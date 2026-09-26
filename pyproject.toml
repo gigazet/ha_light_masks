@@ -1,0 +1,26 @@
+[project]
+name = "ha-light-masks"
+version = "0.2.0"
+description = "Independent light intents composed through Home Assistant virtual lights"
+requires-python = ">=3.14.2"
+
+[dependency-groups]
+dev = ["pytest>=8.3", "pytest-asyncio>=1.0", "ruff>=0.12", "mypy>=1.16", "voluptuous>=0.15"]
+ha = ["homeassistant==2026.9.3", "pytest-homeassistant-custom-component"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/light_masks"]
+asyncio_mode = "auto"
+addopts = "-p no:homeassistant"
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["custom_components/light_masks"]

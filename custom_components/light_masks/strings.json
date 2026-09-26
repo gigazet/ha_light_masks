@@ -1,0 +1,192 @@
+{
+  "title": "Light Masks",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Create a light compositor",
+        "description": "Use ONE individually addressed light, not a group, Lightener, segment alias or another mask. Setup starts in shadow mode and changes no hardware. Existing automations must be retargeted. Fallbacks are used only when the output has no stored attributes; RGB-only outputs default to white.",
+        "data": {
+          "name": "Name",
+          "output": "Physical output light",
+          "individual_output": "I confirm this is one independent endpoint, with no hidden group or overlapping controller",
+          "power_port": "Create the optional Power alias (shares Normal state)",
+          "fallback_brightness": "Initial fallback brightness (1-255)",
+          "fallback_kelvin": "Initial fallback color temperature (K)"
+        }
+      }
+    },
+    "error": {
+      "unavailable_output": "Select an available light.",
+      "aggregate_output": "Groups, Lightener outputs and Light Masks outputs are not supported in this release.",
+      "unsupported_output": "This output's color modes are not supported.",
+      "active_effect": "Stop the native effect before enrolling this output.",
+      "already_configured": "Another Light Masks entry already owns this output.",
+      "confirm_individual": "Confirm that this is an individually addressed, non-overlapping endpoint."
+    },
+    "abort": {
+      "already_configured": "This output is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configure Light Masks",
+        "description": "{count} masks configured. Each mask is an independent light device. Configuration edits preserve active masks and their current deadlines.",
+        "menu_options": {"base": "Base light and integration name", "add_mask": "Add mask", "edit_mask": "Edit mask", "remove_mask": "Remove mask"}
+      },
+      "base": {
+        "title": "Base light",
+        "description": "Replacing the base preserves virtual entity IDs and stored intents but switches Apply OFF. The previous light is left as-is. Review the new target before enabling Apply; Resume may be needed to authorize On. Replacement must support stored colors and configured channels.",
+        "data": {"name": "Integration name", "output": "Base light", "individual_output": "I confirm this is an independent light with no overlapping controllers"}
+      },
+      "add_mask": {
+        "title": "Add mask",
+        "description": "Higher priority wins each selected channel. On activates the mask; Off releases it. Power control contributes On while active. Leave power unchecked for notifications. Color includes RGB and color temperature supported by the base.",
+        "data": {"name": "Name", "priority": "Priority (1-1000)", "power": "Control on/off (On while active; Off releases)", "brightness": "Control brightness", "appearance": "Control color (RGB / color temperature)", "restore": "Restore activation after restart or manual reload", "duration": "Maximum duration in seconds (0 disables expiry)"}
+      },
+      "edit_mask": {"title": "Select mask to edit", "data": {"mask": "Mask"}},
+      "mask": {
+        "title": "Edit mask",
+        "description": "Saving preserves current activation, values and deadline. Changed channels and priority apply immediately. Duration changes apply on the next On. Legacy force-off masks retain their behavior unless you explicitly change it.",
+        "data": {"name": "Name", "priority": "Priority (1-1000)", "power": "Control on/off (On while active; Off releases)", "brightness": "Control brightness", "appearance": "Control color (RGB / color temperature)", "restore": "Restore activation after restart or manual reload", "duration": "Maximum duration in seconds (0 disables expiry)", "force_off": "Legacy: force the output OFF while this mask is active"}
+      },
+      "remove_mask": {"title": "Select mask to remove", "data": {"mask": "Mask"}},
+      "confirm_remove": {
+        "title": "Remove {name}?",
+        "description": "This removes the mask device and its saved state. Automations, scenes and dashboards referencing it are not rewritten. Removing an active mask reveals the lower-priority result and may change the physical light.",
+        "data": {"confirm": "Remove this mask and its saved state"}
+      }
+    },
+    "error": {
+      "unavailable_output": "Select an available base light.",
+      "aggregate_output": "Groups, Lightener outputs and Light Masks outputs are not supported.",
+      "unsupported_output": "This light's color modes are not supported.",
+      "active_effect": "Stop the native effect before selecting this light.",
+      "already_configured": "Another Light Masks entry already owns this light.",
+      "confirm_individual": "Confirm that this is an independent endpoint.",
+      "entry_not_loaded": "Load the integration before replacing its base light.",
+      "incompatible_state": "The replacement cannot represent existing colors or selected mask channels. Choose a compatible light; saved states will not be discarded.",
+      "storage_failed": "Could not persist shadow mode. Check the Light Masks repair and Home Assistant log.",
+      "duplicate_priority": "Another mask already uses this priority.",
+      "empty_mask": "Select at least one controlled channel.",
+      "unsupported_brightness": "The base light does not support brightness.",
+      "unsupported_appearance": "The base light does not support color or color temperature."
+    },
+    "abort": {"mask_not_found": "This mask no longer exists.", "removal_cancelled": "Mask removal cancelled."}
+  },
+  "config_subentries": {
+    "mask": {
+      "entry_type": "Mask",
+      "initiate_flow": {
+        "user": "Add mask",
+        "reconfigure": "Configure mask"
+      },
+      "step": {
+        "user": {
+          "title": "Add an independent mask",
+          "description": "Higher priority wins each selected channel. Off releases the mask. Power control contributes On while active; leave it unchecked for notifications. Color includes RGB and color temperature supported by the base. Configuration edits preserve active masks.",
+          "data": {
+            "name": "Name",
+            "priority": "Priority (1-1000, unique for this output)",
+            "appearance": "Control color (RGB / color temperature)",
+            "brightness": "Control brightness",
+            "power": "Control on/off (On while active; Off releases)",
+            "restore": "Restore activation after restart or manual reload",
+            "duration": "Maximum duration in seconds (0 disables expiry)"
+          }
+        },
+        "reconfigure": {
+          "title": "Configure mask",
+          "description": "Saving preserves activation, stored values and current deadlines. New priority and channel selections apply immediately. Duration changes apply at the next activation.",
+          "data": {
+            "name": "Name",
+            "priority": "Priority (1-1000, unique for this output)",
+            "appearance": "Control color (RGB / color temperature)",
+            "brightness": "Control brightness",
+            "power": "Control on/off (On while active; Off releases)",
+            "restore": "Restore activation after restart or manual reload",
+            "force_off": "Legacy: force the output OFF while this mask is active",
+            "duration": "Maximum duration in seconds (0 disables expiry)"
+          }
+        }
+      },
+      "error": {
+        "duplicate_priority": "Another mask already uses this priority.",
+        "empty_mask": "Enable at least one owned channel.",
+        "unavailable_output": "The base light is not available.",
+        "unsupported_brightness": "The base light does not support brightness.",
+        "unsupported_appearance": "The base light does not support color or color temperature."
+      },
+      "abort": {
+        "reconfigure_successful": "Mask configuration saved."
+      }
+    }
+  },
+  "entity": {
+    "switch": {
+      "apply": {"name": "Apply to output"}
+    },
+    "button": {
+      "resume": {"name": "Resume (may turn light on)"}
+    },
+    "sensor": {
+      "delivery": {
+        "name": "Delivery status",
+        "state": {
+          "shadow": "Shadow",
+          "awaiting_resume": "Awaiting power authorization",
+          "in_sync": "In sync",
+          "pending": "Pending",
+          "unverified": "No confirming state report",
+          "unavailable": "Output unavailable",
+          "failed": "Failed",
+          "suspended_external_change": "Suspended after external change"
+        }
+      }
+    }
+  },
+  "issues": {
+    "external_change": {
+      "title": "Light Masks paused after an external change",
+      "description": "The output {output} changed while masks were active. Intent is preserved and output writes are paused. Stop competing physical/group writers, inspect Light Masks Explain, and press Resume when ready. Resume can turn the light on."
+    },
+    "storage": {
+      "title": "Light Masks could not save intent",
+      "description": "A storage operation for {output} failed. Output writes are blocked. Check disk space, permissions and the Home Assistant log. After fixing storage, press Resume or reload. A rejected command must be submitted again."
+    },
+    "delivery": {
+      "title": "Light Masks output did not converge",
+      "description": "{output} did not reach the requested state after three attempts. Check connectivity, device capabilities and the log. No further attempts are made for this unchanged result until Sync, Resume or a new effective command."
+    },
+    "endpoint": {
+      "title": "Light Masks output is no longer safe to control",
+      "description": "{output} has a native effect, unsupported capabilities, a conflicting owner, or aggregate membership. Stop the effect or remove the conflicting controller and inspect the configuration before Resume. Reload after a capability change."
+    }
+  },
+  "services": {
+    "explain": {
+      "name": "Explain",
+      "description": "Return stored intents, desired and observed state, and channel ownership.",
+      "fields": {"config_entry_id": {"name": "Light Masks entry"}}
+    },
+    "resume": {
+      "name": "Resume",
+      "description": "Clear suspension and authorize the current intent, including On. Apply must also be enabled.",
+      "fields": {"config_entry_id": {"name": "Light Masks entry"}}
+    },
+    "sync": {
+      "name": "Sync",
+      "description": "Retry the current result without clearing suspension or startup power protection.",
+      "fields": {"config_entry_id": {"name": "Light Masks entry"}}
+    },
+    "clear_fields": {
+      "name": "Clear mask fields",
+      "description": "Unset selected stored contributions without releasing mask activation.",
+      "fields": {
+        "config_entry_id": {"name": "Light Masks entry"},
+        "entity_id": {"name": "Mask light"},
+        "fields": {"name": "Fields to clear"}
+      }
+    }
+  }
+}

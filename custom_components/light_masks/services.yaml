@@ -1,0 +1,42 @@
+explain:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: light_masks
+resume:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: light_masks
+sync:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: light_masks
+clear_fields:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: light_masks
+    entity_id:
+      required: true
+      selector:
+        entity:
+          integration: light_masks
+          domain: light
+    fields:
+      required: true
+      selector:
+        select:
+          multiple: true
+          options:
+            - brightness
+            - appearance
