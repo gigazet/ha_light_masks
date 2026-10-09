@@ -4,6 +4,39 @@ This public record omits household names, entity/device identifiers, room
 locations and test dates. Pilot mask names below are generic aliases; reported
 test measurements and coverage limits are preserved.
 
+## Revision 0.3.4 native Zigbee2MQTT group outputs
+
+135 tests pass against Core 2026.9.3 / Python 3.14.7. Ruff lint/format and strict
+mypy pass; the same five upstream deprecation warnings remain.
+
+The 40 new cases cover single-member and homogeneous multi-member native groups.
+Fixtures register MQTT-platform lights and synthetic Zigbee2MQTT group/bridge
+device metadata with real Core entity/device registries. A synthetic group light
+receives Core light services and publishes leaf feedback without invoking leaf
+light services. On/Off, brightness, static color, mask release, shadow mode,
+reload, retained effect metadata and explicit Resume preserve group-only delivery.
+No MQTT broker or radio transport is used by these tests.
+
+Group-only reports cannot confirm a silent member. Leaf divergence suspends even
+without masks; off members are not awakened by persisted On intent at startup.
+Member unavailability defers delivery until recovery. Topology changes block
+delivery, Resume and reload, and changed registry provenance blocks the next write.
+Enrollment rejects missing, malformed, empty, cyclic or repeated membership;
+incompatible capabilities; unavailable/missing members; foreign MQTT config
+entries, unsupported platforms, unrecognized devices/bridges and nested native
+group members. Individual and HA-wrapper ownership conflicts are preserved.
+
+The README documents the exact registry/membership recognition contract and its
+trust boundary. It does not prove MQTT command-topic correctness, actual radio
+group membership, physical reception or non-optimistic feedback. Native effects
+remain unsupported. Core 2026.10.0, real Zigbee2MQTT delivery and hardware behavior
+are not qualified by this local run.
+
+Version metadata is 0.3.4; runtime dependencies and config-entry schema are
+unchanged. Manual installation requires the updated custom component and an HA
+restart. Existing supported entries retain configuration and stored intent.
+No live instance was modified by this implementation.
+
 ## Revision 0.3.3 effect-reporting output compatibility
 
 95 tests pass against Core 2026.9.3 / Python 3.14.7. Ruff lint/format and strict

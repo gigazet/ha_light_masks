@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "Create a light compositor",
-        "description": "Select a light or a compatible Home Assistant light group. The base is fixed after setup. Leave Name empty to use the base's name. Setup starts with Apply off. Use the generated Main control light in ordinary lighting automations instead of the base; it remembers everyday power, brightness and color beneath the masks. Use separate masks for notifications. Do not also control the base or group members from other automations.",
+        "description": "Select a light or a compatible Home Assistant or Zigbee2MQTT light group. Native Zigbee2MQTT groups require discovered membership and compatible MQTT members on the same bridge. The base is fixed after setup. Leave Name empty to use the base's name. Setup starts with Apply off. Use the generated Main control light in ordinary lighting automations instead of the base; it remembers everyday power, brightness and color beneath the masks. Use separate masks for notifications. Do not also control the base or group members from other automations.",
         "data": {
           "name": "Name",
           "output": "Base light or compatible light group",
@@ -16,7 +16,7 @@
     },
     "error": {
       "unavailable_output": "Select an available light.",
-      "aggregate_output": "Use a light or a registered Home Assistant light group without cycles or repeated members. Unknown groups, Lightener and Light Masks outputs are not supported.",
+      "aggregate_output": "Use a light, a registered Home Assistant light group, or a recognized Zigbee2MQTT group with explicit same-bridge MQTT members. Missing or invalid membership, cycles, repeated members, unknown groups, Lightener and Light Masks outputs are not supported.",
       "incompatible_group": "All group members must have identical supported color modes, color-temperature ranges and transition support.",
       "group_changed": "Group members changed. Recreate this Light Masks entry to review the new output.",
       "unsupported_output": "This output's color modes are not supported.",

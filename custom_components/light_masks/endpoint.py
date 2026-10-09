@@ -1,9 +1,11 @@
 """Endpoint topology, compatible light groups and output normalization."""
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
 from homeassistant.core import HomeAssistant, State
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 from .const import DOMAIN, SUPPORTED_MODES
@@ -11,8 +13,37 @@ from .engine import color_from_payload
 from .model import Color, Intent
 
 
+def _zigbee2mqtt_group(
+    hass: HomeAssistant, registered: er.RegistryEntry | None
+) -> dr.DeviceEntry | None:
+    """Recognize discovery metadata, not user-editable display names."""
+    if registered is None or registered.platform != "mqtt" or registered.device_id is None:
+        return None
+    devices = dr.async_get(hass)
+    device = devices.async_get(registered.device_id)
+    if (
+        not isinstance(device, dr.DeviceEntry)
+        or device.manufacturer != "Zigbee2MQTT"
+        or device.model != "Group"
+    ):
+        return None
+    bridge = devices.async_get(device.via_device_id) if device.via_device_id else None
+    if (
+        not isinstance(bridge, dr.DeviceEntry)
+        or bridge.manufacturer != "Zigbee2MQTT"
+        or bridge.model != "Bridge"
+        or registered.config_entry_id not in bridge.config_entries
+        or not any(
+            domain == "mqtt" and re.fullmatch(r"zigbee2mqtt_.+_[0-9]+", identifier)
+            for domain, identifier in device.identifiers
+        )
+    ):
+        raise ValueError("aggregate_output")
+    return device
+
+
 def endpoint_tree(hass: HomeAssistant, entity_id: str) -> tuple[State, ...]:
-    """Expand only registered HA light groups; reject cycles and repeated members."""
+    """Inspect supported groups without changing their native delivery target."""
     registry = er.async_get(hass)
     pending, seen, states = [entity_id], set(), []
     while pending:
@@ -27,14 +58,48 @@ def endpoint_tree(hass: HomeAssistant, entity_id: str) -> tuple[State, ...]:
         platform = registered.platform if registered else None
         if platform in (DOMAIN, "lightener", "lightener_studio"):
             raise ValueError("aggregate_output")
-        if platform == "group":
-            members = state.attributes.get("entity_id")
+        native_group = _zigbee2mqtt_group(hass, registered)
+        if platform == "group" or native_group is not None:
+            key = "group_entities" if native_group is not None else "entity_id"
+            members = state.attributes.get(key)
             if (
                 not isinstance(members, (list, tuple))
                 or not members
                 or not all(isinstance(member, str) for member in members)
+                or (native_group is not None and "entity_id" in state.attributes)
             ):
                 raise ValueError("aggregate_output")
+            if native_group is not None:
+                assert registered is not None
+                devices = dr.async_get(hass)
+                for member in members:
+                    member_state = hass.states.get(member)
+                    if member_state is None:
+                        raise ValueError("unavailable_output")
+                    member_entry = registry.async_get(member)
+                    member_device = (
+                        devices.async_get(member_entry.device_id)
+                        if member_entry and member_entry.device_id
+                        else None
+                    )
+                    if (
+                        member_entry is None
+                        or member_entry.platform != "mqtt"
+                        or member_entry.config_entry_id != registered.config_entry_id
+                        or not isinstance(member_device, dr.DeviceEntry)
+                        or member_device.via_device_id != native_group.via_device_id
+                        or member_device.model == "Group"
+                        or not any(
+                            domain == "mqtt"
+                            and re.fullmatch(r"zigbee2mqtt_0x[0-9a-fA-F]{16}", identifier)
+                            for domain, identifier in member_device.identifiers
+                        )
+                        or any(
+                            key in member_state.attributes
+                            for key in ("entity_id", "group_entities")
+                        )
+                    ):
+                        raise ValueError("aggregate_output")
             pending.extend(members)
         elif any(key in state.attributes for key in ("entity_id", "group_entities")):
             raise ValueError("aggregate_output")
@@ -44,7 +109,9 @@ def endpoint_tree(hass: HomeAssistant, entity_id: str) -> tuple[State, ...]:
 
 def endpoint_members(hass: HomeAssistant, entity_id: str) -> tuple[State, ...]:
     return tuple(
-        state for state in endpoint_tree(hass, entity_id) if "entity_id" not in state.attributes
+        state
+        for state in endpoint_tree(hass, entity_id)
+        if not any(key in state.attributes for key in ("entity_id", "group_entities"))
     )
 
 

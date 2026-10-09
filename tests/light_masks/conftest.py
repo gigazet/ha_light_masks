@@ -1,6 +1,8 @@
 """Real Core fixtures with an in-memory physical light, never a live HA instance."""
 
-from types import MappingProxyType
+import logging
+from datetime import timedelta
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 from homeassistant import loader
@@ -8,6 +10,7 @@ from homeassistant.components.light import ColorMode, LightEntity, LightEntityFe
 from homeassistant.components.light.const import DATA_COMPONENT
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.helpers import frame
+from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_test_home_assistant
 
@@ -123,6 +126,107 @@ async def group_integration(hass, group_output, monkeypatch):
     result = await hass.config_entries.flow.async_init("light_masks", context={"source": "user"})
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {"output": group_output[1]}
+    )
+    assert result["type"] == "create_entry", result
+    entry = result["result"]
+    await hass.async_block_till_done()
+    yield entry
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+class NativeGroupLight(PhysicalLight):
+    """Fake radio delivery: member reports, never member light service calls."""
+
+    def __init__(self, members):
+        super().__init__()
+        self.members = members
+        self._attr_name = "Native group"
+        self._attr_unique_id = "native_group"
+        self._attr_extra_state_attributes = {
+            "group_entities": [member.entity_id for member in members]
+        }
+
+    def report_members(self):
+        for member in self.members:
+            if not member.report:
+                continue
+            member._attr_is_on = self.is_on
+            member._attr_brightness = self.brightness
+            member._attr_color_mode = self.color_mode
+            member._attr_color_temp_kelvin = self.color_temp_kelvin
+            member._attr_xy_color = self.xy_color
+            member.async_write_ha_state()
+
+    async def async_turn_on(self, **kwargs):
+        await super().async_turn_on(**kwargs)
+        if self.report:
+            self.report_members()
+
+    async def async_turn_off(self, **kwargs):
+        await super().async_turn_off(**kwargs)
+        self.report_members()
+
+
+@pytest.fixture
+async def z2m_output(hass, request):
+    from homeassistant.helpers import device_registry as dr
+
+    assert await async_setup_component(hass, "light", {})
+    entry = MockConfigEntry(domain="mqtt", title="Synthetic MQTT")
+    entry.add_to_hass(hass)
+    bridge_identifier = ("mqtt", "zigbee2mqtt_bridge_0x0000000000000001")
+    bridge = dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={bridge_identifier},
+        manufacturer="Zigbee2MQTT",
+        model="Bridge",
+    )
+    platform = EntityPlatform(
+        hass=hass,
+        logger=logging.getLogger(__name__),
+        domain="light",
+        platform_name="mqtt",
+        platform=None,
+        scan_interval=timedelta(seconds=30),
+        entity_namespace=None,
+    )
+    platform.config_entry = entry
+    members = []
+    for index in range(getattr(request, "param", 2)):
+        member = PhysicalLight()
+        member._attr_name = f"Native member {index}"
+        member._attr_unique_id = f"native_member_{index}"
+        member._attr_device_info = {
+            "identifiers": {("mqtt", f"zigbee2mqtt_0x{index + 2:016x}")},
+            "via_device_id": bridge.id,
+            "manufacturer": "Synthetic bulb",
+            "model": "RGB CCT",
+        }
+        members.append(member)
+    await platform.async_add_entities(members)
+    group = NativeGroupLight(members)
+    group._attr_device_info = {
+        "identifiers": {("mqtt", "zigbee2mqtt_testbridge_7")},
+        "via_device_id": bridge.id,
+        "manufacturer": "Zigbee2MQTT",
+        "model": "Group",
+    }
+    await platform.async_add_entities([group])
+    await hass.async_block_till_done()
+    yield SimpleNamespace(group=group, members=members, entry=entry, bridge=bridge)
+    await platform.async_reset()
+
+
+@pytest.fixture
+async def z2m_integration(hass, z2m_output, monkeypatch):
+    from custom_components.light_masks import controller
+
+    monkeypatch.setattr(controller, "ACK_TIMEOUT", 0.04)
+    monkeypatch.setattr(controller, "SETTLE_SECONDS", 0.01)
+    result = await hass.config_entries.flow.async_init("light_masks", context={"source": "user"})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"output": z2m_output.group.entity_id}
     )
     assert result["type"] == "create_entry", result
     entry = result["result"]

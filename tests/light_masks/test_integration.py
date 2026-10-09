@@ -34,6 +34,319 @@ async def settle(hass, controller):
     pytest.fail("Writer did not settle")
 
 
+@pytest.mark.parametrize("z2m_output", [1, 2], indirect=True)
+async def test_z2m_native_delivery_masks_reload_and_effects(hass, z2m_output, z2m_integration):
+    entry = z2m_integration
+    group, members = z2m_output.group, z2m_output.members
+    controller = entry.runtime_data
+    assert set(controller.members) == {member.entity_id for member in members}
+    assert group.entity_id not in controller.members
+    assert group.entity_id in controller.nodes
+    assert not group.calls
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    controller = entry.runtime_data
+    result = await options_step(hass, entry, "add_mask")
+    await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            "name": "Notification",
+            "priority": 100,
+            "power": False,
+            "brightness": False,
+            "appearance": True,
+            "restore": False,
+            "duration": 0,
+        },
+    )
+    await hass.async_block_till_done()
+    controller = entry.runtime_data
+    ids = entities(hass, entry)
+    mask = ids[next(iter(entry.subentries))]
+    await call(hass, ids["normal"], brightness=90, color_temp_kelvin=3500)
+    await settle(hass, controller)
+    assert not group.calls
+    await controller.set_apply(True)
+    await settle(hass, controller)
+    assert controller.status == "in_sync"
+    assert len(group.calls) == 1
+    await call(hass, mask, rgb_color=[0, 255, 0])
+    await settle(hass, controller)
+    assert controller.status == "in_sync"
+    assert len(group.calls) == 2
+    assert all(member.brightness == 90 and member.color_mode == "xy" for member in members)
+    await call(hass, mask, "turn_off")
+    await settle(hass, controller)
+    assert len(group.calls) == 3
+    assert all(member.color_temp_kelvin == 3500 for member in members)
+    group._attr_effect = "rainbow"
+    group.async_write_ha_state()
+    await asyncio.sleep(0.04)
+    assert len(group.calls) == 3
+    await call(hass, ids["normal"], "turn_off")
+    await settle(hass, controller)
+    assert len(group.calls) == 4
+    assert all(not member.is_on for member in members)
+    assert all(not member.calls for member in members)
+    assert all("effect" not in payload for _, payload in group.calls)
+
+
+@pytest.mark.parametrize("z2m_output", [1, 2], indirect=True)
+async def test_z2m_aggregate_report_cannot_confirm_silent_leaf(hass, z2m_output, z2m_integration):
+    controller = z2m_integration.runtime_data
+    z2m_output.members[-1].report = False
+    await controller.set_apply(True)
+    await call(hass, entities(hass, z2m_integration)["normal"], brightness=80)
+    await settle(hass, controller)
+    assert z2m_output.group.is_on
+    assert controller.status in ("failed", "unverified")
+    assert not controller.converged(controller.desired())
+    assert 1 <= len(z2m_output.group.calls) <= 3
+    assert all(not member.calls for member in z2m_output.members)
+
+
+@pytest.mark.parametrize("z2m_output", [1, 2], indirect=True)
+async def test_z2m_external_leaf_change_suspends_and_resume_uses_group(
+    hass, z2m_output, z2m_integration
+):
+    controller = z2m_integration.runtime_data
+    await controller.set_apply(True)
+    await call(hass, entities(hass, z2m_integration)["normal"], brightness=80)
+    await settle(hass, controller)
+    member = z2m_output.members[-1]
+    member._attr_is_on = False
+    member.async_write_ha_state()
+    await asyncio.sleep(0.04)
+    await hass.async_block_till_done()
+    assert controller.engine.suspended
+    assert controller.engine.normal.on
+    assert len(z2m_output.group.calls) == 1
+    await controller.resume()
+    await settle(hass, controller)
+    assert controller.status == "in_sync"
+    assert len(z2m_output.group.calls) == 2
+    assert not member.calls
+
+
+async def test_z2m_startup_does_not_trust_aggregate_on(hass, z2m_output, z2m_integration):
+    entry = z2m_integration
+    group = z2m_output.group
+    group._attr_is_on = True
+    group.async_write_ha_state()
+    z2m_output.members[0]._attr_is_on = True
+    z2m_output.members[0].async_write_ha_state()
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    controller = entry.runtime_data
+    await call(hass, entities(hass, entry)["normal"])
+    await controller.set_apply(True)
+    await settle(hass, controller)
+    # Persist On intent, then simulate an off member at a fresh startup.
+    z2m_output.members[-1]._attr_is_on = False
+    z2m_output.members[-1].async_write_ha_state()
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    controller = entry.runtime_data
+    calls = len(group.calls)
+    await settle(hass, controller)
+    assert controller.status == "awaiting_resume"
+    assert len(group.calls) == calls
+    assert not z2m_output.members[-1].is_on
+
+
+async def test_z2m_unavailable_member_defers_delivery(hass, z2m_output, z2m_integration):
+    controller = z2m_integration.runtime_data
+    member = z2m_output.members[-1]
+    member._attr_available = False
+    member.async_write_ha_state()
+    await hass.async_block_till_done()
+    await controller.set_apply(True)
+    await call(hass, entities(hass, z2m_integration)["normal"], brightness=70)
+    await settle(hass, controller)
+    assert controller.status == "unavailable"
+    assert not z2m_output.group.calls
+    member._attr_available = True
+    member.async_write_ha_state()
+    await settle(hass, controller)
+    assert controller.status == "in_sync"
+    assert len(z2m_output.group.calls) == 1
+
+
+async def test_z2m_topology_change_blocks_delivery_and_reload(hass, z2m_output, z2m_integration):
+    from homeassistant.exceptions import ServiceValidationError
+
+    controller = z2m_integration.runtime_data
+    group = z2m_output.group
+    group._attr_extra_state_attributes = {"group_entities": [z2m_output.members[0].entity_id]}
+    group.async_write_ha_state()
+    await hass.async_block_till_done()
+    await controller.set_apply(True)
+    await call(hass, entities(hass, z2m_integration)["normal"])
+    await settle(hass, controller)
+    assert controller.status == "failed"
+    assert not group.calls
+    with pytest.raises(ServiceValidationError, match="group_changed"):
+        await controller.resume()
+    await hass.config_entries.async_reload(z2m_integration.entry_id)
+    assert not hasattr(z2m_integration, "runtime_data")
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value", "error"),
+    [
+        ("supported_color_modes", ["onoff"], "incompatible_group"),
+        ("min_color_temp_kelvin", 3000, "incompatible_group"),
+        ("supported_features", 0, "incompatible_group"),
+        ("group_entities", ["light.anything"], "aggregate_output"),
+        ("entity_id", ["light.anything"], "aggregate_output"),
+    ],
+)
+async def test_z2m_rejects_incompatible_or_nested_members(
+    hass, z2m_output, attribute, value, error
+):
+    from custom_components.light_masks.endpoint import validate_endpoint
+
+    member = z2m_output.members[0]
+    attributes = dict(hass.states.get(member.entity_id).attributes)
+    hass.states.async_set(member.entity_id, "off", {**attributes, attribute: value})
+    with pytest.raises(ValueError, match=error):
+        validate_endpoint(hass, z2m_output.group.entity_id)
+
+
+@pytest.mark.parametrize("membership", [None, [], "member", [42], "duplicate", "cycle", "missing"])
+async def test_z2m_rejects_malformed_membership(hass, z2m_output, membership):
+    from custom_components.light_masks.endpoint import validate_endpoint
+
+    group = z2m_output.group
+    attributes = dict(hass.states.get(group.entity_id).attributes)
+    if membership == "duplicate":
+        membership = [z2m_output.members[0].entity_id] * 2
+    elif membership == "cycle":
+        membership = [group.entity_id]
+    if membership == "missing":
+        attributes.pop("group_entities")
+    else:
+        attributes["group_entities"] = membership
+    hass.states.async_set(group.entity_id, "off", attributes)
+    with pytest.raises(ValueError, match="aggregate_output"):
+        validate_endpoint(hass, group.entity_id)
+
+
+@pytest.mark.parametrize(
+    ("target", "changes"),
+    [
+        ("group", {"manufacturer": "Other vendor"}),
+        ("group", {"model": "Unknown"}),
+        ("group", {"new_identifiers": {("mqtt", "unknown_7")}}),
+        ("group", {"via_device_id": None}),
+        ("bridge", {"manufacturer": "Other vendor"}),
+        ("bridge", {"model": "Unknown"}),
+        ("member", {"via_device_id": None}),
+        ("member", {"new_identifiers": {("mqtt", "unknown_bulb")}}),
+    ],
+)
+async def test_z2m_rejects_unverified_provenance(hass, z2m_output, target, changes):
+    from homeassistant.helpers import device_registry as dr
+
+    from custom_components.light_masks.endpoint import validate_endpoint
+
+    registry = er.async_get(hass)
+    device_id = (
+        z2m_output.bridge.id
+        if target == "bridge"
+        else registry.async_get(
+            z2m_output.group.entity_id if target == "group" else z2m_output.members[0].entity_id
+        ).device_id
+    )
+    dr.async_get(hass).async_update_device(device_id, **changes)
+    with pytest.raises(ValueError, match="aggregate_output"):
+        validate_endpoint(hass, z2m_output.group.entity_id)
+
+
+async def test_z2m_ownership_includes_leaves_and_ha_wrappers(hass, z2m_output, z2m_integration):
+    from custom_components.light_masks.endpoint import validate_endpoint
+
+    registry = er.async_get(hass)
+    member = z2m_output.members[0]
+    with pytest.raises(ValueError, match="already_configured"):
+        validate_endpoint(hass, member.entity_id)
+    wrapper = registry.async_get_or_create("light", "group", "ha_wrapper")
+    attributes = dict(hass.states.get(z2m_output.group.entity_id).attributes)
+    attributes.pop("group_entities")
+    attributes["entity_id"] = [z2m_output.group.entity_id]
+    hass.states.async_set(wrapper.entity_id, "off", attributes)
+    with pytest.raises(ValueError, match="already_configured"):
+        validate_endpoint(hass, wrapper.entity_id)
+    attributes["entity_id"].append(member.entity_id)
+    hass.states.async_set(wrapper.entity_id, "off", attributes)
+    with pytest.raises(ValueError, match="aggregate_output"):
+        validate_endpoint(hass, wrapper.entity_id)
+
+
+async def test_z2m_existing_leaf_owner_prevents_group_enrollment(hass, z2m_output):
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.light_masks.endpoint import validate_endpoint
+
+    MockConfigEntry(
+        domain="light_masks",
+        data={"output": z2m_output.members[0].entity_id},
+    ).add_to_hass(hass)
+    with pytest.raises(ValueError, match="already_configured"):
+        validate_endpoint(hass, z2m_output.group.entity_id)
+
+
+@pytest.mark.parametrize("state", ["unavailable", "unknown", None])
+async def test_z2m_enrollment_requires_available_members(hass, z2m_output, state):
+    from custom_components.light_masks.endpoint import validate_endpoint
+
+    member = z2m_output.members[0]
+    if state is None:
+        hass.states.async_remove(member.entity_id)
+    else:
+        hass.states.async_set(
+            member.entity_id, state, dict(hass.states.get(member.entity_id).attributes)
+        )
+    with pytest.raises(ValueError, match="unavailable_output"):
+        validate_endpoint(hass, z2m_output.group.entity_id)
+
+
+@pytest.mark.parametrize("platform", ["mqtt", "group", "light_masks", "lightener", "unknown"])
+async def test_z2m_rejects_foreign_member_registry(hass, z2m_output, platform):
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.light_masks.endpoint import validate_endpoint
+
+    entry = MockConfigEntry(domain=platform)
+    entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    member = registry.async_get(z2m_output.members[0].entity_id)
+    foreign = registry.async_get_or_create(
+        "light", platform, "foreign", config_entry=entry, device_id=member.device_id
+    )
+    hass.states.async_set(
+        foreign.entity_id, "off", dict(hass.states.get(member.entity_id).attributes)
+    )
+    group = z2m_output.group
+    attributes = dict(hass.states.get(group.entity_id).attributes)
+    attributes["group_entities"] = [foreign.entity_id]
+    hass.states.async_set(group.entity_id, "off", attributes)
+    with pytest.raises(ValueError, match="aggregate_output"):
+        validate_endpoint(hass, group.entity_id)
+
+
+async def test_z2m_changed_provenance_blocks_next_write(hass, z2m_output, z2m_integration):
+    from homeassistant.helpers import device_registry as dr
+
+    dr.async_get(hass).async_update_device(z2m_output.bridge.id, model="Unknown")
+    controller = z2m_integration.runtime_data
+    await controller.set_apply(True)
+    await call(hass, entities(hass, z2m_integration)["normal"])
+    await settle(hass, controller)
+    assert controller.status == "failed"
+    assert not z2m_output.group.calls
+
+
 async def test_real_services_notification_circadian_switch(hass, integration, output):
     controller = integration.runtime_data
     ids = entities(hass, integration)

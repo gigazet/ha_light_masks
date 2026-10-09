@@ -7,9 +7,9 @@
 Let the wall switch control power, circadian lighting choose the color temperature,
 and a finished appliance show a notification on the **same light**.
 Each automation talks to its own normal-looking virtual light. Light Masks combines
-their requests and sends one resolved result to the real bulb or compatible HA group.
+their requests and sends one resolved result to the real bulb or compatible light group.
 
-**Release: 0.3.3** · **Home Assistant: 2026.9.3 development baseline** ·
+**Release: 0.3.4** · **Home Assistant: 2026.9.3 development baseline** ·
 **UI: English / Ukrainian** · **License: [MIT](LICENSE)**
 
 [Get started](#get-started) · [Terminology](#terminology) ·
@@ -52,7 +52,7 @@ flowchart LR
     AM --> R
     UM --> R
     R --> G["Apply + safety checks"]
-    G --> B["Base light / compatible HA group"]
+    G --> B["Base light / compatible light group"]
     classDef baseline fill:#fff3c4,stroke:#b8792a,color:#18243b
     classDef mint fill:#a5fff0,stroke:#14908f,color:#18243b
     classDef violet fill:#dfd2ff,stroke:#7053c5,color:#18243b
@@ -85,7 +85,7 @@ not a snapshot captured before the notification.
 
 | Term | Meaning |
 |---|---|
-| **Base / output** | The existing light or compatible HA light group receiving the final commands. Ordinary automations should no longer write to it directly. |
+| **Base / output** | The existing light or compatible HA/Zigbee2MQTT light group receiving the final commands. Ordinary automations should no longer write to it directly. |
 | **Main control** | The generated baseline light. Remembers everyday power, brightness and color underneath all masks. Use it for normal lighting. |
 | **Power alias** | Optional on/off-only light sharing Main control's power state. Not another mask or independent priority. |
 | **Mask / layer** | An independent virtual light with its own stored values, activation, priority and channel permissions. "Mask" is the UI term. |
@@ -230,7 +230,8 @@ The development baseline is **Home Assistant Core 2026.9.3 / Python 3.14.7**.
 No earlier or later Core version is qualified. The integration uses native config
 subentries and has no additional runtime pip requirements.
 
-Supported outputs are individual lights or registered Home Assistant light groups advertising only these modes:
+Supported outputs are individual lights, registered Home Assistant light groups,
+or recognized Zigbee2MQTT light groups advertising only these modes:
 `onoff`, `brightness`, `color_temp`, `xy`, `hs`, `rgb`.
 Core performs normal light-service conversions, such as RGB requests to XY.
 Only select channels the endpoint actually supports.
@@ -242,17 +243,49 @@ fixed when enrolled; changing it blocks output, including after reload. Restore
 the original membership or recreate the Light Masks entry after reviewing consumers.
 Overlapping member ownership between Light Masks entries is rejected.
 
-Group commands go through HA's light-group service, not a device-native multicast
-or atomic operation. Confirmation checks every leaf light; aggregate averages and
+HA group commands use HA's light-group service. **Zigbee2MQTT group commands target
+the native MQTT group light entity**, including single-member groups; Light Masks
+never expands native group delivery into individual bulb service calls. Zigbee2MQTT
+owns the underlying radio transport; no atomicity or physical simultaneity is promised.
+Confirmation checks every leaf light; aggregate averages and
 "any member On" cannot establish success. Main control stores one common intent,
 not a snapshot of each bulb. Applying it can unify previously different member
 settings. Mixed On/Off at startup needs explicit On authorization before waking
 off members. Member divergence suspends group output even with no active masks.
 Membership edits cannot cancel a group command already dispatched.
 
+### Zigbee2MQTT groups (0.3.4)
+
+Recognition requires an entity registered by `mqtt`, attached to a device with
+manufacturer `Zigbee2MQTT`, model `Group`, and an MQTT identifier shaped
+`zigbee2mqtt_<namespace>_<numeric group id>`. Its `via_device_id` must identify a
+`Zigbee2MQTT` / `Bridge` device belonging to the same MQTT config entry. Names and
+user overrides do not establish group identity.
+
+The group must expose a nonempty `group_entities` list of light entity IDs and no
+competing `entity_id` membership attribute. Each direct member must be registered
+by MQTT on the same config entry and bridge, with a device MQTT identifier
+`zigbee2mqtt_0x<16 hexadecimal digits>`. Native groups cannot contain groups,
+unregistered members or compositor facades. Compatible HA groups may wrap native
+groups; repeated/overlapping leaves remain forbidden.
+
+All members must expose compatible capabilities and available feedback, even for
+a single-member group. Missing discovery/membership fails closed. An optimistic
+group report alone cannot confirm delivery. Member reports may themselves be
+optimistic; `in_sync` is not independent verification of radio reception.
+Recognition trusts HA's registry and discovered membership, not a separate audit
+of MQTT topics or the radio's actual group table. Keep discovery synchronized with
+Zigbee2MQTT and audit external bindings, aliases and writers before enabling Apply.
+
+No new runtime dependency or entry migration is required. Install the updated
+component and restart HA before enrolling native groups. Existing supported
+individual-light and HA-group entries retain their configuration and intent.
+Native effects remain unsupported; use static color commands.
+
 Not supported in this release:
 
-- Mixed-capability or unknown/vendor groups, Lightener/Lightener Studio outputs, other masks, overlapping segment
+- Mixed-capability or unknown/vendor groups other than the recognized Zigbee2MQTT
+  groups above, Lightener/Lightener Studio outputs, other masks, overlapping segment
   aliases, RGBW/RGBWW/white-mode endpoints, selecting native effects through masks,
   and flash actions.
 - Cross-output synchronization, group broadcast planning, automatic automation
@@ -283,14 +316,14 @@ Use explicit virtual entity IDs; manage areas, labels and exposure yourself.
 
 ## Manual installation
 
-1. Back up Home Assistant configuration. Build or obtain `light-masks-0.3.3.zip`
+1. Back up Home Assistant configuration. Build or obtain `light-masks-0.3.4.zip`
    (local builds are in `dist`) and extract it.
    Copy its `custom_components\light_masks` directory into the Home Assistant
    configuration directory's `custom_components` directory. Do not copy `.venv`,
    tests or the development dependency files into Home Assistant.
 2. Restart Home Assistant when convenient. Installation and restart are manual.
 3. Open **Settings > Devices & services > Add integration > Light Masks**.
-   Select an available light or compatible HA light group. The base is fixed
+   Select an available light or compatible HA/Zigbee2MQTT light group. The base is fixed
    after setup. **Name** is optional and defaults to the base's display name.
    It labels the integration/devices only, not lighting behavior. Leave the
    optional Power alias unchecked unless switches need an on/off-only port that
@@ -527,7 +560,10 @@ scene restoration, action metadata and translation structure. Configure coverage
 includes device visibility/capabilities, stable identities, independent retained
 state, deadline preservation, confirmed removal, overlapping reloads, failed
 reload cleanup, fixed-base validation, Main control naming and compatible HA
-group delivery, per-member confirmation, topology and overlapping ownership.
+and Zigbee2MQTT group delivery, per-member confirmation, topology and overlapping
+ownership. Native-group tests use real Core MQTT-platform light entities with a
+synthetic radio endpoint that publishes member feedback without invoking member
+services. They do not connect to an MQTT broker or test radio packets.
 The pure 32-mask
 resolver is tested at p95 below 5 ms; this does not measure end-to-end disk/device
 latency. User-installed 0.1.0 and 0.3.1 pilots passed the scoped live
