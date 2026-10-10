@@ -14,7 +14,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import LightMasksEntry
 from .controller import Controller
-from .entity import MaskEntity, mask_device_info
+from .entity import MaskEntity, mask_device_info, zone_device_info
 from .model import Intent
 
 PARALLEL_UPDATES = 0
@@ -32,6 +32,10 @@ async def async_setup_entry(
         ):
             registry.async_update_entity(registered.entity_id, hidden_by=None)
     entities = [IntentLight(controller, "normal", "Main control")]
+    if controller.engine.multi_zone:
+        entities.extend(
+            IntentLight(controller, zone, "Main control") for zone in controller.outputs
+        )
     if entry.data["power_port"]:
         entities.append(IntentLight(controller, "normal", "Power", power_only=True))
     async_add_entities(entities)
@@ -49,11 +53,13 @@ class IntentLight(MaskEntity, LightEntity):
     ) -> None:
         super().__init__(controller, "power" if power_only else producer)
         self.producer, self.power_only = producer, power_only
-        if producer == "normal" and not power_only:
+        if controller.engine.is_normal(producer) and not power_only:
             self._attr_translation_key = "main"
         else:
             self._attr_name = name
-        if producer != "normal":
+        if producer != "normal" and producer in controller.engine.normals:
+            self._attr_device_info = zone_device_info(controller, producer)
+        elif producer != "normal":
             self._attr_name = None
             self._attr_device_info = mask_device_info(controller, producer)
         mask = next((mask for mask in controller.engine.masks if mask.id == producer), None)
@@ -76,7 +82,13 @@ class IntentLight(MaskEntity, LightEntity):
     @property
     def intent(self) -> Intent:
         engine = self.controller.engine
-        return engine.normal if self.producer == "normal" else engine.intents[self.producer]
+        return (
+            engine.normal
+            if self.producer == "normal"
+            else engine.normals[self.producer]
+            if self.producer in engine.normals
+            else engine.intents[self.producer]
+        )
 
     @property
     def is_on(self) -> bool:
@@ -91,8 +103,15 @@ class IntentLight(MaskEntity, LightEntity):
         )
 
     @property
-    def color_mode(self) -> ColorMode:
+    def color_mode(self) -> ColorMode | None:
         assert self._attr_supported_color_modes is not None
+        if (
+            self.controller.engine.multi_zone
+            and self.producer == "normal"
+            and self.intent.color is None
+            and self._attr_supported_color_modes - {ColorMode.ONOFF, ColorMode.BRIGHTNESS}
+        ):
+            return ColorMode.UNKNOWN
         if self.intent.color and self.intent.color.mode in self._attr_supported_color_modes:
             return ColorMode(self.intent.color.mode)
         return sorted(self._attr_supported_color_modes, key=str)[0]
@@ -133,11 +152,24 @@ class IntentLight(MaskEntity, LightEntity):
             "role": "power"
             if self.power_only
             else "normal"
-            if self.producer == "normal"
+            if self.controller.engine.is_normal(self.producer)
             else "mask",
             "expires_at": self.intent.expires_at,
         }
-        if self.producer != "normal":
+        if self.controller.engine.multi_zone and self.controller.engine.is_normal(self.producer):
+            if self.producer == "normal":
+                normals = tuple(self.controller.engine.normals.values())
+                result.update(
+                    scope="whole",
+                    mixed_power=len({intent.on for intent in normals}) > 1,
+                    on_zone_count=sum(intent.on for intent in normals),
+                    zone_count=len(normals),
+                    mixed_brightness=len({intent.brightness for intent in normals}) > 1,
+                    mixed_appearance=len({intent.color for intent in normals}) > 1,
+                )
+            else:
+                result.update(scope="zone", zone_id=self.producer)
+        if not self.controller.engine.is_normal(self.producer):
             mask = next(m for m in self.controller.engine.masks if m.id == self.producer)
             result.update(
                 {

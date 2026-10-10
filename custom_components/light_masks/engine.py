@@ -14,6 +14,17 @@ type Save = Callable[[Snapshot], Awaitable[None]]
 type Operation = Literal["on", "off", "toggle", "clear"]
 
 
+def common_intent(intents: Mapping[str, Intent]) -> Intent:
+    """Whole ordinary state is any-On; mixed channel values are deliberately unset."""
+    values = tuple(intents.values())
+    first = values[0]
+    return Intent(
+        any(value.on for value in values),
+        first.brightness if all(v.brightness == first.brightness for v in values) else None,
+        first.color if all(v.color == first.color for v in values) else None,
+    )
+
+
 def encode(intent: Intent) -> dict[str, object]:
     return asdict(intent)
 
@@ -61,9 +72,16 @@ def color_from_payload(data: Mapping[str, object]) -> Color | None:
 class Engine:
     """All accepted mutations are persisted before becoming visible."""
 
-    def __init__(self, normal: Intent, masks: tuple[Mask, ...], save: Save) -> None:
+    def __init__(
+        self, normal: Intent | Mapping[str, Intent], masks: tuple[Mask, ...], save: Save
+    ) -> None:
         validate_masks(masks)
-        self.normal = normal
+        self.multi_zone = not isinstance(normal, Intent)
+        self.normals = {"normal": normal} if isinstance(normal, Intent) else dict(normal)
+        if not self.normals or (self.multi_zone and "normal" in self.normals):
+            raise ValueError("Invalid ordinary zone identities")
+        if set(self.normals).intersection(mask.id for mask in masks):
+            raise ValueError("Zone and mask identities overlap")
         self.masks = masks
         self.intents = {mask.id: Intent() for mask in masks}
         self.apply = False
@@ -72,18 +90,53 @@ class Engine:
         self.lock = asyncio.Lock()
         self._save = save
 
-    def snapshot(self) -> Snapshot:
+    @property
+    def normal(self) -> Intent:
+        return common_intent(self.normals) if self.multi_zone else self.normals["normal"]
+
+    @normal.setter
+    def normal(self, intent: Intent) -> None:
+        if self.multi_zone:
+            raise ValueError("Set multi-zone ordinary intents atomically")
+        self.normals["normal"] = intent
+
+    def is_normal(self, producer: str) -> bool:
+        return producer == "normal" or producer in self.normals
+
+    def _snapshot(
+        self, normals: dict[str, Intent], intents: dict[str, Intent], apply: bool, suspended: bool
+    ) -> Snapshot:
         return {
-            "normal": encode(self.normal),
-            "intents": {key: encode(value) for key, value in self.intents.items()},
-            "apply": self.apply,
-            "suspended": self.suspended,
+            **(
+                {
+                    "schema": "multi_zone_v1",
+                    "normals_by_zone": {key: encode(value) for key, value in normals.items()},
+                }
+                if self.multi_zone
+                else {"normal": encode(normals["normal"])}
+            ),
+            "intents": {key: encode(value) for key, value in intents.items()},
+            "apply": apply,
+            "suspended": suspended,
         }
+
+    def snapshot(self) -> Snapshot:
+        return self._snapshot(self.normals, self.intents, self.apply, self.suspended)
 
     def restore(
         self, raw: Mapping[str, object], now: float, *, preserve_activation: bool = False
     ) -> None:
-        normal = decode(raw["normal"])
+        if self.multi_zone:
+            stored_normals = raw.get("normals_by_zone")
+            if (
+                raw.get("schema") != "multi_zone_v1"
+                or not isinstance(stored_normals, dict)
+                or set(stored_normals) != set(self.normals)
+            ):
+                raise ValueError("Stored zone identities do not match configuration")
+            normals = {key: decode(value) for key, value in stored_normals.items()}
+        else:
+            normals = {"normal": decode(raw["normal"])}
         stored = raw["intents"]
         if not isinstance(stored, dict):
             raise ValueError("Stored masks must be an object")
@@ -97,25 +150,23 @@ class Engine:
             intents[mask.id] = intent
         if type(raw["apply"]) is not bool or type(raw.get("suspended", False)) is not bool:
             raise ValueError("Invalid stored operating mode")
-        self.normal, self.intents = normal, intents
+        self.normals, self.intents = normals, intents
         self.apply = raw["apply"]
         self.suspended = cast(bool, raw.get("suspended", False))
 
-    def resolution(self, now: float) -> Resolution:
-        return resolve(self.normal, self.masks, self.intents, now)
+    def resolution(self, now: float, zone: str | None = None) -> Resolution:
+        return resolve(
+            self.normal if zone is None else self.normals[zone], self.masks, self.intents, now
+        )
+
+    def resolutions(self, now: float) -> dict[str, Resolution]:
+        return {zone: self.resolution(now, zone) for zone in self.normals}
 
     async def _commit(
-        self, normal: Intent, intents: dict[str, Intent], apply: bool, suspended: bool
+        self, normals: dict[str, Intent], intents: dict[str, Intent], apply: bool, suspended: bool
     ) -> None:
-        await self._save(
-            {
-                "normal": encode(normal),
-                "intents": {key: encode(value) for key, value in intents.items()},
-                "apply": apply,
-                "suspended": suspended,
-            }
-        )
-        self.normal, self.intents = normal, intents
+        await self._save(self._snapshot(normals, intents, apply, suspended))
+        self.normals, self.intents = normals, intents
         self.apply, self.suspended = apply, suspended
         self.revision += 1
 
@@ -131,9 +182,16 @@ class Engine:
     ) -> tuple[Intent, Intent]:
         async with self.lock:
             previous = self.resolution(now).intent
-            if producer != "normal" and producer not in self.intents:
+            ordinary = self.is_normal(producer)
+            if not ordinary and producer not in self.intents:
                 raise ValueError("Unknown producer")
-            intent = self.normal if producer == "normal" else self.intents[producer]
+            intent = (
+                self.normal
+                if producer == "normal"
+                else self.normals[producer]
+                if ordinary
+                else self.intents[producer]
+            )
             mask = next((m for m in self.masks if m.id == producer), None)
             if operation == "toggle":
                 operation = "off" if intent.on else "on"
@@ -149,7 +207,7 @@ class Engine:
                     or any(key not in ("brightness", "appearance") for key in fields)
                 ):
                     raise ValueError("Specify brightness and/or appearance")
-                if producer == "normal":
+                if ordinary:
                     raise ValueError("Cannot clear the normal fallback")
                 intent = replace(
                     intent,
@@ -184,18 +242,32 @@ class Engine:
             else:
                 raise ValueError("Unknown operation")
             intents = {**self.intents}
-            normal = self.normal
-            if producer == "normal":
-                normal = intent
+            normals = dict(self.normals)
+            if ordinary:
+                for zone in normals if producer == "normal" else (producer,):
+                    old = normals[zone]
+                    normals[zone] = Intent(
+                        intent.on,
+                        intent.brightness
+                        if (operation == "on" and not power_only and "brightness" in data)
+                        else old.brightness,
+                        intent.color
+                        if (
+                            operation == "on"
+                            and not power_only
+                            and color_from_payload(data) is not None
+                        )
+                        else old.color,
+                    )
             else:
                 intents[producer] = intent
-            await self._commit(normal, intents, self.apply, self.suspended)
+            await self._commit(normals, intents, self.apply, self.suspended)
             return previous, self.resolution(now).intent
 
     async def set_mode(self, *, apply: bool | None = None, suspended: bool | None = None) -> None:
         async with self.lock:
             await self._commit(
-                self.normal,
+                self.normals,
                 self.intents,
                 self.apply if apply is None else apply,
                 self.suspended if suspended is None else suspended,
@@ -210,7 +282,7 @@ class Engine:
             if any(
                 i.on and (i.expires_at is None or i.expires_at > now) for i in self.intents.values()
             ):
-                await self._commit(self.normal, self.intents, self.apply, True)
+                await self._commit(self.normals, self.intents, self.apply, True)
                 return "suspended"
             normal = replace(
                 self.normal,
@@ -218,7 +290,9 @@ class Engine:
                 brightness=observed.brightness or self.normal.brightness,
                 color=observed.color or self.normal.color,
             )
-            await self._commit(normal, self.intents, self.apply, self.suspended)
+            if self.multi_zone:
+                raise ValueError("Multi-zone telemetry cannot change ordinary intent")
+            await self._commit({"normal": normal}, self.intents, self.apply, self.suspended)
             return "adopted"
 
     async def expire(self, now: float) -> bool:
@@ -231,5 +305,5 @@ class Engine:
             }
             if intents == self.intents:
                 return False
-            await self._commit(self.normal, intents, self.apply, self.suspended)
+            await self._commit(self.normals, intents, self.apply, self.suspended)
             return True

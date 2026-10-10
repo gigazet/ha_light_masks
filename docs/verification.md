@@ -4,6 +4,57 @@ This public record omits household names, entity/device identifiers, room
 locations and test dates. Pilot mask names below are generic aliases; reported
 test measurements and coverage limits are preserved.
 
+## 0.4.0b1 beta multi-zone native compositor
+
+199 tests pass in the isolated beta release tree against Core 2026.9.3 /
+Python 3.14.7. Ruff lint/format, strict mypy and the Git whitespace check pass.
+Five upstream deprecation warnings remain.
+
+The opt-in implementation adds independent durable zone normals, a whole Main
+facade, shared mask intents and leases, and a pure native-group dispatch planner.
+Legacy single-output snapshots and entity IDs retain their existing shapes.
+New snapshots carry `schema: multi_zone_v1` and require the exact configured zone
+set. No automatic conversion or live migration is performed.
+
+Real Core synthetic fixtures exercise three disjoint MQTT zones and an optional
+exact-cover aggregate. Coverage includes any-On/mixed whole state, atomic whole
+commands, omitted-value preservation, appearance-only circadian masks, alarm
+precedence over later ordinary Off, latest-intent restoration, shared expiry and
+clear-fields, configuration-edit handoff and manual-reload policy. Mixed colors
+use Core's accepted `unknown` color mode rather than inventing an average.
+
+Native service assertions verify aggregate selection, zone-only fallback,
+partial-success retries, no-report outcomes, service failures with matching
+feedback, transitions and supersession during dispatch. A zone's acknowledgment
+timeout does not delay sending the next disjoint zone command. Divergence arriving
+while another zone is busy is reconciled afterward without adopting telemetry.
+The **user-confirmed** outage policy isolates unavailable roots/members to their
+whole zone while healthy zones continue, with overall `degraded` status.
+An unavailable alias uses native-zone fallback. Tests cover Core dropping extra
+attributes on unavailable entities, missing states with intact registry identity,
+alarm visibility, hidden ordinary Off, expiry/supersession during outages,
+recovery without renewed startup authorization, and forbidden aggregate retries.
+Frozen metadata never grants delivery to an unavailable zone. Unsafe topology,
+provenance changes and ownership conflicts still fail closed globally.
+Alias recovery does not erase failed delivery after matching telemetry.
+Tests also cover startup
+authorization from individual zone leaves, corrupt snapshots, ownership races,
+review-time and first-setup revalidation, fixed provenance/capabilities and
+registry rename/removal.
+
+The current component is packaged in a temporary test destination and compared
+byte-for-byte with the selected source files, including the new dispatch module,
+translations and branding. The published local 0.3.4 archive is not overwritten.
+The 204-test development-checkout result includes five separate, pending branding
+tests. Those branding edits are excluded from this beta's release tree.
+
+This is synthetic Core testing, not a hardware or browser-interface qualification.
+It does not establish real radio group membership, reception, physical
+simultaneity or guaranteed physical-remote intent adoption. Normal inputs must use
+Main facades. Direct bound remotes and native-output commands remain bypasses.
+Version 0.4.0b1 is an opt-in prerelease; stable 0.3.4 does not contain this
+feature. No live HA changes occurred as part of implementation or publication.
+
 ## Revision 0.3.4 native Zigbee2MQTT group outputs
 
 135 tests pass against Core 2026.9.3 / Python 3.14.7. Ruff lint/format and strict

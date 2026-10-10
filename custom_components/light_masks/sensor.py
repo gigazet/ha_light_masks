@@ -9,7 +9,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import LightMasksEntry
 from .controller import Controller
-from .entity import MaskEntity, mask_device_info
+from .entity import MaskEntity, mask_device_info, zone_device_info
 
 type Permission = Literal["power", "brightness", "appearance"]
 PERMISSIONS: tuple[Permission, ...] = ("power", "brightness", "appearance")
@@ -19,6 +19,10 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: LightMasksEntry, async_add_entities: AddConfigEntryEntitiesCallback
 ) -> None:
     async_add_entities([DeliverySensor(entry.runtime_data, "delivery")])
+    if entry.runtime_data.engine.multi_zone:
+        async_add_entities(
+            [ZoneDeliverySensor(entry.runtime_data, zone) for zone in entry.runtime_data.outputs]
+        )
     for subentry in entry.subentries.values():
         if subentry.subentry_type == "mask":
             async_add_entities(
@@ -65,6 +69,7 @@ class DeliverySensor(MaskEntity, SensorEntity):
         "pending",
         "unverified",
         "unavailable",
+        "degraded",
         "failed",
         "suspended_external_change",
     ]
@@ -72,3 +77,14 @@ class DeliverySensor(MaskEntity, SensorEntity):
     @property
     def native_value(self) -> str:
         return self.controller.status
+
+
+class ZoneDeliverySensor(DeliverySensor):
+    def __init__(self, controller: Controller, zone: str) -> None:
+        super().__init__(controller, f"{zone}_delivery")
+        self.zone = zone
+        self._attr_device_info = zone_device_info(controller, zone)
+
+    @property
+    def native_value(self) -> str:
+        return self.controller.delivery_status(self.zone)

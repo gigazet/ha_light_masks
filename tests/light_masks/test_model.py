@@ -145,3 +145,113 @@ def test_hs_wrap_and_achromatic_feedback():
         Intent(True, color=Color("hs", (200, 50))),
         Intent(True, color=Color("hs", (10, 50))),
     )
+
+
+async def test_multi_zone_global_atomicity_shared_lease_and_latest_normals():
+    save = AsyncMock()
+    normals = {"a": Intent(True, 80, BLUE), "b": Intent(False, 100, GREEN)}
+    masks = (Mask("sun", 10), Mask("alarm", 100, power="force_on", duration=60, restore=True))
+    engine = Engine(normals, masks, save)
+    await engine.update("sun", "on", {"color_temp_kelvin": 4000}, 100)
+    assert [r.intent.on for r in engine.resolutions(100).values()] == [True, False]
+    await engine.update("alarm", "on", {"xy_color": (0.1, 0.2)}, 100)
+    assert engine.intents["alarm"].expires_at == 160
+    await engine.update("a", "off", {}, 110)
+    await engine.update("b", "on", {"brightness": 70}, 111)
+    assert all(r.intent.on for r in engine.resolutions(111).values())
+    await engine.update("alarm", "on", {}, 120)
+    assert engine.intents["alarm"].expires_at == 180
+    assert not await engine.expire(179)
+    assert await engine.expire(180)
+    assert engine.normals == {"a": Intent(False, 80, BLUE), "b": Intent(True, 70, GREEN)}
+    results = engine.resolutions(180)
+    assert not results["a"].intent.on
+    assert results["b"].intent.brightness == 70
+    assert results["b"].intent.color == Color("color_temp", 4000)
+    count = save.await_count
+    await engine.update("normal", "toggle", {}, 200)
+    assert save.await_count == count + 1
+    assert not engine.normal.on
+    await engine.update("normal", "toggle", {}, 200)
+    assert all(i.on for i in engine.normals.values())
+    assert [i.brightness for i in engine.normals.values()] == [80, 70]
+    assert engine.normal.brightness is None and engine.normal.color is None
+    await engine.update("normal", "on", {"brightness": 150, "color_temp_kelvin": 3000}, 201)
+    assert all(i == Intent(True, 150, Color("color_temp", 3000)) for i in engine.normals.values())
+    before = engine.snapshot()
+    save.side_effect = OSError("write failed")
+    with pytest.raises(OSError):
+        await engine.update("normal", "off", {}, 210)
+    assert engine.snapshot() == before
+
+
+@pytest.mark.parametrize("corruption", ["schema", "missing", "extra", "invalid"])
+async def test_multi_zone_snapshot_validation(corruption):
+    engine = Engine({"a": Intent(False, 100), "b": Intent(True, 150)}, (), AsyncMock())
+    raw = engine.snapshot()
+    if corruption == "schema":
+        raw["schema"] = "future"
+    elif corruption == "missing":
+        raw["normals_by_zone"].pop("a")
+    elif corruption == "extra":
+        raw["normals_by_zone"]["c"] = {"on": False}
+    else:
+        raw["normals_by_zone"]["a"]["on"] = "on"
+    with pytest.raises(ValueError):
+        engine.restore(raw, 0)
+    assert engine.normals["a"].on is False
+
+
+async def test_multi_zone_restart_and_config_edit_restore_policy():
+    masks = (
+        Mask("temporary", 50, duration=30),
+        Mask("restored", 100, power="force_on", restore=True, duration=60),
+    )
+    normals = {"a": Intent(False, 100), "b": Intent(True, 150)}
+    engine = Engine(normals, masks, AsyncMock())
+    for mask in masks:
+        await engine.update(mask.id, "on", {}, 100)
+    await engine.set_mode(apply=True, suspended=True)
+    restored = Engine(normals, masks, AsyncMock())
+    restored.restore(engine.snapshot(), 110)
+    assert not restored.intents["temporary"].on
+    assert restored.intents["restored"].expires_at == 160
+    assert restored.apply and restored.suspended
+    restored.restore(engine.snapshot(), 120, preserve_activation=True)
+    assert restored.intents["temporary"].on
+    restored.restore(engine.snapshot(), 170, preserve_activation=True)
+    assert not any(i.on for i in restored.intents.values())
+    assert restored.normals == normals
+    with pytest.raises(ValueError, match="telemetry"):
+        await restored.reconcile(Intent(False), 170, restored.revision)
+    assert restored.normals == normals
+
+
+@pytest.mark.parametrize(
+    ("on", "needed", "different_value", "different_transition", "expected"),
+    [
+        (True, {"a", "b"}, False, False, ["all"]),
+        (False, {"a", "b"}, True, False, ["all"]),
+        (True, {"a"}, False, False, ["one"]),
+        (True, {"a", "b"}, True, False, ["one", "two"]),
+        (True, {"a", "b"}, False, True, ["one", "two"]),
+        (True, set(), False, False, []),
+    ],
+)
+def test_native_dispatch_plan(on, needed, different_value, different_transition, expected):
+    from custom_components.light_masks.dispatch import plan_dispatch
+
+    desired = {"a": Intent(on, 100, BLUE), "b": Intent(on, 80 if different_value else 100, BLUE)}
+    plan = plan_dispatch(
+        {"a": "one", "b": "two"},
+        desired,
+        needed,
+        {"a": 1.0, "b": 2.0 if different_transition else 1.0},
+        True,
+        "all",
+    )
+    assert [command.output for command in plan] == expected
+    assert all(command.payload == {"transition": 1.0} for command in plan) if not on else True
+    covered = [zone for command in plan for zone in command.zones]
+    assert len(covered) == len(set(covered))
+    assert set(covered) == needed

@@ -42,7 +42,11 @@ def _zigbee2mqtt_group(
     return device
 
 
-def endpoint_tree(hass: HomeAssistant, entity_id: str) -> tuple[State, ...]:
+def endpoint_tree(
+    hass: HomeAssistant,
+    entity_id: str,
+    unavailable_attributes: Mapping[str, Mapping[str, Any]] | None = None,
+) -> tuple[State, ...]:
     """Inspect supported groups without changing their native delivery target."""
     registry = er.async_get(hass)
     pending, seen, states = [entity_id], set(), []
@@ -51,7 +55,7 @@ def endpoint_tree(hass: HomeAssistant, entity_id: str) -> tuple[State, ...]:
         if current in seen:
             raise ValueError("aggregate_output")
         seen.add(current)
-        state = hass.states.get(current)
+        state = endpoint_state(hass, current, unavailable_attributes)
         if not current.startswith("light.") or state is None:
             raise ValueError("unavailable_output")
         registered = registry.async_get(current)
@@ -73,7 +77,7 @@ def endpoint_tree(hass: HomeAssistant, entity_id: str) -> tuple[State, ...]:
                 assert registered is not None
                 devices = dr.async_get(hass)
                 for member in members:
-                    member_state = hass.states.get(member)
+                    member_state = endpoint_state(hass, member, unavailable_attributes)
                     if member_state is None:
                         raise ValueError("unavailable_output")
                     member_entry = registry.async_get(member)
@@ -107,32 +111,69 @@ def endpoint_tree(hass: HomeAssistant, entity_id: str) -> tuple[State, ...]:
     return tuple(states)
 
 
-def endpoint_members(hass: HomeAssistant, entity_id: str) -> tuple[State, ...]:
+def endpoint_state(
+    hass: HomeAssistant,
+    entity_id: str,
+    unavailable_attributes: Mapping[str, Mapping[str, Any]] | None,
+) -> State | None:
+    state = hass.states.get(entity_id)
+    if unavailable_attributes is not None and (state is None or state.state not in ("on", "off")):
+        if attributes := unavailable_attributes.get(entity_id):
+            # Core omits extra attributes when an entity is unavailable. Frozen
+            # metadata can prove isolation, never availability or permission to send.
+            return State(
+                entity_id,
+                state.state if state else "unavailable",
+                {**attributes, **(state.attributes if state else {})},
+            )
+    return state
+
+
+def endpoint_members(
+    hass: HomeAssistant,
+    entity_id: str,
+    unavailable_attributes: Mapping[str, Mapping[str, Any]] | None = None,
+) -> tuple[State, ...]:
     return tuple(
         state
-        for state in endpoint_tree(hass, entity_id)
+        for state in endpoint_tree(hass, entity_id, unavailable_attributes)
         if not any(key in state.attributes for key in ("entity_id", "group_entities"))
     )
 
 
-def member_identities(hass: HomeAssistant, entity_id: str) -> list[str]:
+def member_identities(
+    hass: HomeAssistant,
+    entity_id: str,
+    unavailable_attributes: Mapping[str, Mapping[str, Any]] | None = None,
+) -> list[str]:
     registry = er.async_get(hass)
     return sorted(
         registered.id if (registered := registry.async_get(state.entity_id)) else state.entity_id
-        for state in endpoint_members(hass, entity_id)
+        for state in endpoint_members(hass, entity_id, unavailable_attributes)
     )
 
 
-def validate_endpoint(hass: HomeAssistant, entity_id: str, entry_id: str | None = None) -> State:
+def validate_endpoint(
+    hass: HomeAssistant,
+    entity_id: str,
+    entry_id: str | None = None,
+    *,
+    require_available: bool = True,
+    unavailable_attributes: Mapping[str, Mapping[str, Any]] | None = None,
+) -> State:
     """Validate every member, compatible capabilities and exclusive ownership."""
-    state = hass.states.get(entity_id)
-    if not entity_id.startswith("light.") or state is None or state.state not in ("on", "off"):
+    state = endpoint_state(hass, entity_id, unavailable_attributes)
+    if (
+        not entity_id.startswith("light.")
+        or state is None
+        or (require_available and state.state not in ("on", "off"))
+    ):
         raise ValueError("unavailable_output")
     registry = er.async_get(hass)
     registered = registry.async_get(entity_id)
     modes = set(state.attributes.get("supported_color_modes", []))
-    for member in endpoint_tree(hass, entity_id):
-        if member.state not in ("on", "off"):
+    for member in endpoint_tree(hass, entity_id, unavailable_attributes):
+        if require_available and member.state not in ("on", "off"):
             raise ValueError("unavailable_output")
         member_modes = set(member.attributes.get("supported_color_modes", []))
         if not member_modes or not member_modes <= SUPPORTED_MODES:
@@ -147,10 +188,12 @@ def validate_endpoint(hass: HomeAssistant, entity_id: str, entry_id: str | None 
             != state.attributes.get("supported_features", 0) & 32
         ):
             raise ValueError("incompatible_group")
-    identities = member_identities(hass, entity_id)
+    identities = member_identities(hass, entity_id, unavailable_attributes)
     for entry in hass.config_entries.async_entries(DOMAIN):
         if entry.entry_id == entry_id:
-            if entry.data.get("output_members", identities) != identities:
+            if entry.data.get("mode") != "multi_zone" and (
+                entry.data.get("output_members", identities) != identities
+            ):
                 raise ValueError("group_changed")
             continue
         if entry.data["output"] == entity_id or (
@@ -167,6 +210,135 @@ def validate_endpoint(hass: HomeAssistant, entity_id: str, entry_id: str | None 
         if set(identities).intersection(owned):
             raise ValueError("already_configured")
     return state
+
+
+def capability_key(attributes: Mapping[str, Any]) -> dict[str, Any]:
+    modes = sorted(attributes["supported_color_modes"])
+    return {
+        "modes": modes,
+        "minimum": attributes.get("min_color_temp_kelvin") if "color_temp" in modes else None,
+        "maximum": attributes.get("max_color_temp_kelvin") if "color_temp" in modes else None,
+        "transition": bool(attributes.get("supported_features", 0) & 32),
+    }
+
+
+def native_record(
+    hass: HomeAssistant,
+    output: str,
+    entry_id: str | None = None,
+    *,
+    require_available: bool = True,
+    frozen: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    unavailable_attributes = None
+    if not require_available and frozen is not None:
+        members = record_members(hass, frozen)
+        attributes = record_attributes(frozen)
+        unavailable_attributes = {member: attributes for member in members} | {
+            output: {**attributes, "group_entities": members}
+        }
+    state = validate_endpoint(
+        hass,
+        output,
+        entry_id,
+        require_available=require_available,
+        unavailable_attributes=unavailable_attributes,
+    )
+    registered = er.async_get(hass).async_get(output)
+    device = _zigbee2mqtt_group(hass, registered)
+    if device is None or registered is None:
+        raise ValueError("native_zone_required")
+    return {
+        "output": output,
+        "output_registry_id": registered.id,
+        "output_members": member_identities(hass, output, unavailable_attributes),
+        "bridge_id": device.via_device_id,
+        "config_entry_id": registered.config_entry_id,
+        "capabilities": capability_key(state.attributes),
+    }
+
+
+def record_output(hass: HomeAssistant, record: Mapping[str, Any]) -> str:
+    registered = er.async_get(hass).async_get(record["output_registry_id"])
+    if registered is None:
+        raise ValueError("group_changed")
+    return registered.entity_id
+
+
+def record_members(hass: HomeAssistant, record: Mapping[str, Any]) -> tuple[str, ...]:
+    registry = er.async_get(hass)
+    members = []
+    for identity in record["output_members"]:
+        registered = registry.async_get(identity)
+        if registered is None:
+            raise ValueError("group_changed")
+        members.append(registered.entity_id)
+    return tuple(members)
+
+
+def record_attributes(record: Mapping[str, Any]) -> dict[str, Any]:
+    capabilities = record["capabilities"]
+    return {
+        "supported_color_modes": capabilities["modes"],
+        "min_color_temp_kelvin": capabilities["minimum"],
+        "max_color_temp_kelvin": capabilities["maximum"],
+        "supported_features": 32 if capabilities["transition"] else 0,
+    }
+
+
+def validate_zones(
+    hass: HomeAssistant,
+    zones: list[dict[str, Any]],
+    aggregate: Mapping[str, Any] | None,
+    entry_id: str | None = None,
+    *,
+    enrolling: bool = False,
+    require_available: bool = True,
+) -> dict[str, str]:
+    """Validate disjoint native owners and their optional exact-cover delivery alias."""
+    if len(zones) < 2 or len({zone["id"] for zone in zones}) != len(zones):
+        raise ValueError("invalid_zones")
+    outputs: dict[str, str] = {}
+    union: set[str] = set()
+    reference = zones[0]
+    for record in [*zones, *([aggregate] if aggregate else [])]:
+        output = record_output(hass, record)
+        current = native_record(
+            hass,
+            output,
+            entry_id,
+            require_available=enrolling or require_available,
+            frozen=record,
+        )
+        for key in (
+            "output_registry_id",
+            "output_members",
+            "bridge_id",
+            "config_entry_id",
+            "capabilities",
+        ):
+            if current[key] != record[key]:
+                raise ValueError("group_changed")
+        if any(
+            current[key] != reference[key]
+            for key in ("bridge_id", "config_entry_id", "capabilities")
+        ):
+            raise ValueError("incompatible_group")
+        members = set(current["output_members"])
+        if record is aggregate:
+            if members != union:
+                raise ValueError("aggregate_cover")
+        else:
+            if union.intersection(members):
+                raise ValueError("overlapping_zones")
+            union.update(members)
+            outputs[record["id"]] = output
+            if enrolling:
+                states = {member.state for member in endpoint_members(hass, output)}
+                root = hass.states.get(output)
+                if len(states) != 1 or root is None or root.state not in states:
+                    raise ValueError("mixed_zone")
+    return outputs
 
 
 def observe(state: State | None) -> Intent | None:

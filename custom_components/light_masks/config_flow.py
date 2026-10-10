@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
+from uuid import uuid4
 
 import voluptuous as vol
 from homeassistant.config_entries import (
@@ -19,7 +20,12 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import selector
 
 from .const import DOMAIN
-from .endpoint import member_identities, validate_endpoint
+from .endpoint import (
+    member_identities,
+    native_record,
+    validate_endpoint,
+    validate_zones,
+)
 
 
 def output_entity(hass: HomeAssistant, entry: ConfigEntry) -> str:
@@ -101,10 +107,19 @@ def mask_errors(
 class LightMasksConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
+    def __init__(self) -> None:
+        self._base: dict[str, Any] = {}
+        self._zones: list[dict[str, Any]] = []
+
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors = {}
         if user_input is not None:
+            if user_input.get("multi_zone"):
+                self._base = dict(user_input)
+                return await self.async_step_zone()
             try:
+                if not user_input.get("output"):
+                    raise ValueError("unavailable_output")
                 state = validate_endpoint(self.hass, user_input["output"])
                 registered = er.async_get(self.hass).async_get(user_input["output"])
                 await self.async_set_unique_id(
@@ -129,7 +144,8 @@ class LightMasksConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Optional("name", default=""): vol.All(str, vol.Strip),
-                    vol.Required("output"): selector.EntitySelector(
+                    vol.Optional("multi_zone", default=False): bool,
+                    vol.Optional("output"): selector.EntitySelector(
                         selector.EntitySelectorConfig(domain="light")
                     ),
                     vol.Required("power_port", default=False): bool,
@@ -139,6 +155,87 @@ class LightMasksConfigFlow(ConfigFlow, domain=DOMAIN):
                     vol.Required("fallback_kelvin", default=4000): vol.All(
                         vol.Coerce(int), vol.Range(min=1000, max=40000)
                     ),
+                }
+            ),
+        )
+
+    async def async_step_zone(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors = {}
+        if user_input is not None:
+            try:
+                record = native_record(self.hass, user_input["output"])
+                zone = {**record, "id": f"zone_{uuid4().hex}", "name": user_input["name"]}
+                candidates = [*self._zones, zone]
+                if len(candidates) > 1:
+                    validate_zones(self.hass, candidates, None, enrolling=True)
+                elif not user_input["add_another"]:
+                    raise ValueError("invalid_zones")
+            except ValueError as err:
+                errors["base"] = str(err)
+            else:
+                self._zones = candidates
+                if not user_input["add_another"]:
+                    return await self.async_step_aggregate()
+        return self.async_show_form(
+            step_id="zone",
+            errors=errors,
+            description_placeholders={"count": str(len(self._zones))},
+            data_schema=vol.Schema(
+                {
+                    vol.Required("name"): vol.All(str, vol.Strip, vol.Length(min=1)),
+                    vol.Required("output"): selector.EntitySelector(
+                        selector.EntitySelectorConfig(domain="light")
+                    ),
+                    vol.Required("add_another", default=True): bool,
+                }
+            ),
+        )
+
+    async def async_step_aggregate(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        errors = {}
+        if user_input is not None:
+            try:
+                aggregate = (
+                    native_record(self.hass, user_input["aggregate"])
+                    if user_input.get("aggregate")
+                    else None
+                )
+                validate_zones(self.hass, self._zones, aggregate, enrolling=True)
+                if not user_input["confirm"]:
+                    raise ValueError("confirm_routing")
+            except ValueError as err:
+                errors["base"] = str(err)
+            else:
+                return self.async_create_entry(
+                    title=self._base.get("name", "").strip() or self._zones[0]["name"],
+                    data={
+                        "mode": "multi_zone",
+                        "zones": self._zones,
+                        "aggregate": aggregate,
+                        "output": self._zones[0]["output"],
+                        "output_registry_id": self._zones[0]["output_registry_id"],
+                        "output_members": sorted(
+                            member for zone in self._zones for member in zone["output_members"]
+                        ),
+                        "power_port": False,
+                        "fallback_brightness": self._base["fallback_brightness"],
+                        "fallback_kelvin": self._base["fallback_kelvin"],
+                    },
+                )
+        return self.async_show_form(
+            step_id="aggregate",
+            errors=errors,
+            description_placeholders={
+                "zones": ", ".join(f"{z['name']}: {z['output']}" for z in self._zones)
+            },
+            data_schema=vol.Schema(
+                {
+                    vol.Optional("aggregate"): selector.EntitySelector(
+                        selector.EntitySelectorConfig(domain="light")
+                    ),
+                    vol.Required("confirm", default=False): bool,
                 }
             ),
         )
@@ -164,12 +261,65 @@ class LightMasksOptionsFlow(OptionsFlow):
             sub for sub in self.config_entry.subentries.values() if sub.subentry_type == "mask"
         ]
         menu = ["base", "add_mask"]
+        if self.config_entry.data.get("mode") == "multi_zone":
+            menu.append("rename_zone")
         if masks:
             menu.extend(("edit_mask", "remove_mask"))
         return self.async_show_menu(
             step_id="init",
             menu_options=menu,
             description_placeholders={"count": str(len(masks))},
+        )
+
+    async def async_step_rename_zone(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        zones = self.config_entry.data["zones"]
+        if user_input is not None:
+            self._selected = user_input["zone"]
+            return await self.async_step_zone_name()
+        return self.async_show_form(
+            step_id="rename_zone",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("zone"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                selector.SelectOptionDict(value=z["id"], label=z["name"])
+                                for z in zones
+                            ]
+                        )
+                    ),
+                }
+            ),
+        )
+
+    async def async_step_zone_name(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        entry = self.config_entry
+        zone = next(z for z in entry.data["zones"] if z["id"] == self._selected)
+        if user_input is not None:
+            self.hass.config_entries.async_update_entry(
+                entry,
+                data={
+                    **entry.data,
+                    "zones": [
+                        {**z, "name": user_input["name"]} if z["id"] == self._selected else dict(z)
+                        for z in entry.data["zones"]
+                    ],
+                },
+            )
+            return self.async_create_entry(title="", data=dict(entry.options))
+        return self.async_show_form(
+            step_id="zone_name",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("name", default=zone["name"]): vol.All(
+                        str, vol.Strip, vol.Length(min=1)
+                    )
+                }
+            ),
         )
 
     async def async_step_base(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
@@ -192,7 +342,16 @@ class LightMasksOptionsFlow(OptionsFlow):
         return self.async_show_form(
             step_id="base",
             errors=errors,
-            description_placeholders={"output": old_output},
+            description_placeholders={
+                "output": ", ".join(
+                    registered.entity_id
+                    if (registered := er.async_get(self.hass).async_get(zone["output_registry_id"]))
+                    else zone["output"]
+                    for zone in entry.data["zones"]
+                )
+                if entry.data.get("mode") == "multi_zone"
+                else old_output
+            },
             data_schema=vol.Schema(
                 {
                     vol.Required("name", default=values["name"]): vol.All(

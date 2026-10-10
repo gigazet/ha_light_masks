@@ -17,6 +17,16 @@ def mask_device_info(controller: Controller, mask_id: str) -> DeviceInfo:
     )
 
 
+def zone_device_info(controller: Controller, zone_id: str) -> DeviceInfo:
+    zone = next(zone for zone in controller.entry.data["zones"] if zone["id"] == zone_id)
+    return DeviceInfo(
+        identifiers={(DOMAIN, f"{controller.entry.entry_id}_{zone_id}")},
+        name=f"{controller.entry.title} {zone['name']}",
+        manufacturer="Light Masks",
+        model="Zone main control",
+    )
+
+
 class MaskEntity(Entity):
     _attr_should_poll = False
     _attr_has_entity_name = True

@@ -7,15 +7,33 @@
         "description": "Select a light or a compatible Home Assistant or Zigbee2MQTT light group. Native Zigbee2MQTT groups require discovered membership and compatible MQTT members on the same bridge. The base is fixed after setup. Leave Name empty to use the base's name. Setup starts with Apply off. Use the generated Main control light in ordinary lighting automations instead of the base; it remembers everyday power, brightness and color beneath the masks. Use separate masks for notifications. Do not also control the base or group members from other automations.",
         "data": {
           "name": "Name",
+          "multi_zone": "Multi-zone native Zigbee2MQTT compositor",
           "output": "Base light or compatible light group",
           "power_port": "Create an optional power-only alias (shares Main control state)",
           "fallback_brightness": "Initial fallback brightness (1-255)",
           "fallback_kelvin": "Initial fallback color temperature (K)"
-        }
+        },
+        "data_description": {"multi_zone": "Optional: configure at least two disjoint native groups with shared masks. Leave Base empty; Power alias is ignored in this mode. The following steps collect zones and an optional whole-room group. Ordinary controls must target the generated Main lights."}
+      },
+      "zone": {
+        "title": "Add a native zone",
+        "description": "{count} zones added. Each zone needs a disjoint Zigbee2MQTT group on the same bridge with identical capabilities. All members of each zone must have the same known power state during enrollment. Zone topology is fixed after setup.",
+        "data": {"name": "Zone name", "output": "Native zone group", "add_another": "Add another zone"}
+      },
+      "aggregate": {
+        "title": "Review zones and optional aggregate",
+        "description": "Zones: {zones}. The optional native aggregate must contain exactly the union of these zones. It is used only when all zones are available and need identical commands; otherwise native zone groups are used. Whole Main is On if any ordinary zone is On; its toggle then requests all Off. Mixed color and brightness are not averaged. Masks apply to every zone. Unknown/unavailable members block only their zone; healthy zones continue with overall degraded status. Unsafe topology still blocks the compositor. Setup starts with Apply Off.",
+        "data": {"aggregate": "Optional whole-room native group", "confirm": "I will route ordinary controls through zone/whole Main lights, not physical outputs"}
       }
     },
     "error": {
       "unavailable_output": "Select an available light.",
+      "native_zone_required": "Multi-zone outputs must be recognized native Zigbee2MQTT groups, not individual bulbs or HA groups.",
+      "invalid_zones": "Configure at least two distinct zones.",
+      "overlapping_zones": "Zones must not share any member.",
+      "aggregate_cover": "The aggregate must cover exactly all zone members, without missing or extra lights.",
+      "mixed_zone": "Initialize this native zone to a uniform known On or Off state before enrolling it.",
+      "confirm_routing": "Confirm Main facade routing before creating the compositor.",
       "aggregate_output": "Use a light, a registered Home Assistant light group, or a recognized Zigbee2MQTT group with explicit same-bridge MQTT members. Missing or invalid membership, cycles, repeated members, unknown groups, Lightener and Light Masks outputs are not supported.",
       "incompatible_group": "All group members must have identical supported color modes, color-temperature ranges and transition support.",
       "group_changed": "Group members changed. Recreate this Light Masks entry to review the new output.",
@@ -31,8 +49,10 @@
       "init": {
         "title": "Configure Light Masks",
         "description": "{count} masks configured. Each mask is an independent light device. Configuration edits preserve active masks and their current deadlines.",
-        "menu_options": {"base": "Name and main control", "add_mask": "Add mask", "edit_mask": "Edit mask", "remove_mask": "Remove mask"}
+        "menu_options": {"base": "Name and main control", "add_mask": "Add mask", "edit_mask": "Edit mask", "remove_mask": "Remove mask", "rename_zone": "Rename zone"}
       },
+      "rename_zone": {"title": "Select zone to rename", "data": {"zone": "Zone"}},
+      "zone_name": {"title": "Rename zone", "description": "Only the display name changes. Entity IDs, membership and stored ordinary intent remain unchanged.", "data": {"name": "Zone name"}},
       "base": {
         "title": "Name and main control",
         "description": "Fixed base: {output}. Name labels this setup and its devices; it does not change entity IDs or lighting behavior. Use Main control for ordinary lighting automations, not the base. Main control remembers everyday power, brightness and color; masks temporarily override selected channels. Main control Off requests darkness, while mask Off releases that mask. Power-controlling masks can override Main control's power. To use a different base, create a new Light Masks entry.",
@@ -165,6 +185,7 @@
           "pending": "Pending",
           "unverified": "No confirming state report",
           "unavailable": "Output unavailable",
+          "degraded": "Degraded: healthy zones continue",
           "failed": "Failed",
           "suspended_external_change": "Suspended after external change"
         }

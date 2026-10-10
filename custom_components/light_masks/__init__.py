@@ -1,11 +1,12 @@
 """Light Masks integration lifecycle."""
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.core import HomeAssistant, ServiceCall, State, SupportsResponse
 from homeassistant.exceptions import (
     ConfigEntryError,
     ConfigEntryNotReady,
@@ -18,7 +19,7 @@ from homeassistant.helpers.service import async_register_admin_service
 
 from .const import DOMAIN, PLATFORMS
 from .controller import Controller
-from .endpoint import observe, validate_endpoint
+from .endpoint import observe, record_attributes, record_output, validate_endpoint, validate_zones
 from .model import Color, Intent, Mask
 
 type LightMasksEntry = ConfigEntry[Controller]
@@ -80,22 +81,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: LightMasksEntry) -> bool:
-    output = entry.data["output"]
-    registry = er.async_get(hass)
-    if registry_id := entry.data.get("output_registry_id"):
-        if registered := registry.async_get(registry_id):
-            output = registered.entity_id
-        else:
-            raise ConfigEntryError(
-                "Output registry entry was removed; review the replacement and recreate this entry"
-            )
-    try:
-        state = validate_endpoint(hass, output, entry.entry_id)
-    except ValueError as err:
-        if str(err) == "unavailable_output":
-            raise ConfigEntryNotReady("Waiting for the output light") from err
-        raise ConfigEntryError(f"Unsafe or unsupported output: {err}") from err
+def seed_intent(state: State, entry: LightMasksEntry) -> Intent:
     observed = observe(state)
     assert observed is not None
     modes = set(state.attributes["supported_color_modes"])
@@ -109,11 +95,63 @@ async def async_setup_entry(hass: HomeAssistant, entry: LightMasksEntry) -> bool
             color = Color("hs", (0.0, 0.0))
         elif "rgb" in modes:
             color = Color("rgb", (255.0, 255.0, 255.0))
-    initial = Intent(
+    return Intent(
         observed.on,
         None if modes == {"onoff"} else observed.brightness or entry.data["fallback_brightness"],
         color,
     )
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: LightMasksEntry) -> bool:
+    output = entry.data["output"]
+    registry = er.async_get(hass)
+    outputs = None
+    aggregate = None
+    initial: Intent | dict[str, Intent]
+    attributes: Mapping[str, Any]
+    try:
+        if entry.data.get("mode") == "multi_zone":
+            outputs = validate_zones(
+                hass,
+                entry.data["zones"],
+                entry.data.get("aggregate"),
+                entry.entry_id,
+                require_available=False,
+            )
+            output = next(iter(outputs.values()))
+            aggregate = (
+                record_output(hass, entry.data["aggregate"])
+                if entry.data.get("aggregate")
+                else None
+            )
+            initial = {}
+            for zone, target in outputs.items():
+                zone_state = hass.states.get(target)
+                # Unknown zones must restore durable intent; initialize rejects a
+                # missing snapshot rather than persisting this construction placeholder.
+                initial[zone] = (
+                    seed_intent(zone_state, entry)
+                    if zone_state is not None and observe(zone_state) is not None
+                    else Intent(False)
+                )
+        elif registry_id := entry.data.get("output_registry_id"):
+            if registered := registry.async_get(registry_id):
+                output = registered.entity_id
+            else:
+                raise ConfigEntryError(
+                    "Output registry entry was removed; "
+                    "review the replacement and recreate this entry"
+                )
+        if outputs is None:
+            state = validate_endpoint(hass, output, entry.entry_id)
+            initial = seed_intent(state, entry)
+            attributes = state.attributes
+        else:
+            attributes = record_attributes(entry.data["zones"][0])
+    except ValueError as err:
+        if str(err) == "unavailable_output":
+            raise ConfigEntryNotReady("Waiting for the output light") from err
+        raise ConfigEntryError(f"Unsafe or unsupported output: {err}") from err
     masks = tuple(
         Mask(
             subentry.subentry_id,
@@ -127,12 +165,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: LightMasksEntry) -> bool
         for subentry in entry.subentries.values()
         if subentry.subentry_type == "mask"
     )
-    controller = Controller(hass, entry, output, initial, masks, state.attributes)
+    controller = Controller(
+        hass, entry, output, initial, masks, attributes, outputs=outputs, aggregate=aggregate
+    )
     previous: Controller | None = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
     preserve_activation = previous is not None
     if previous is not None:
-        if previous.output == output:
-            controller.authorized_on = previous.authorized_on
+        if previous.outputs == controller.outputs and previous.aggregate == controller.aggregate:
+            controller.authorizations = dict(previous.authorizations)
             controller._safety_block = previous._safety_block
             controller.error = previous.error
         else:

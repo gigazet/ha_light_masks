@@ -1,5 +1,6 @@
 """Real Core fixtures with an in-memory physical light, never a live HA instance."""
 
+import asyncio
 import logging
 from datetime import timedelta
 from types import MappingProxyType, SimpleNamespace
@@ -42,6 +43,7 @@ class PhysicalLight(LightEntity):
 
     def __init__(self):
         self.calls = []
+        self.started = asyncio.Event()
         self.gate = None
         self.report = True
         self.fail = False
@@ -49,6 +51,7 @@ class PhysicalLight(LightEntity):
 
     async def async_turn_on(self, **kwargs):
         self.calls.append(("on", kwargs))
+        self.started.set()
         if self.gate is not None:
             await self.gate.wait()
         if self.fail:
@@ -214,7 +217,9 @@ async def z2m_output(hass, request):
     }
     await platform.async_add_entities([group])
     await hass.async_block_till_done()
-    yield SimpleNamespace(group=group, members=members, entry=entry, bridge=bridge)
+    yield SimpleNamespace(
+        group=group, members=members, entry=entry, bridge=bridge, platform=platform
+    )
     await platform.async_reset()
 
 

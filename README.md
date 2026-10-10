@@ -9,7 +9,7 @@ and a finished appliance show a notification on the **same light**.
 Each automation talks to its own normal-looking virtual light. Light Masks combines
 their requests and sends one resolved result to the real bulb or compatible light group.
 
-**Release: 0.3.4** · **Home Assistant: 2026.9.3 development baseline** ·
+**Beta: 0.4.0b1** · **Home Assistant: 2026.9.3 development baseline** ·
 **UI: English / Ukrainian** · **License: [MIT](LICENSE)**
 
 [Get started](#get-started) · [Terminology](#terminology) ·
@@ -100,6 +100,122 @@ not a snapshot captured before the notification.
 | **Compositor** | One Light Masks integration entry: its base, Main control, masks and output writer. |
 | **Shadow mode** | Apply is Off. Requests are stored and combined, but not sent to the base. |
 | **Delivery status** | Whether physical feedback agrees with the desired result. Different from a mask's activation or permissions. |
+
+## Multi-zone native groups (0.4.0b1 beta)
+
+**Opt-in beta feature; not included in stable 0.3.4.** Existing
+single-output entries keep their configuration, entity IDs, saved intent and
+reconciliation rules. There is no automatic conversion or live migration.
+
+Choose **Multi-zone native Zigbee2MQTT compositor** when adding an integration.
+Leave Base empty (the optional Power alias is ignored in this mode). Add at least
+two named native groups, then uncheck **Add another zone** on the last one.
+Optionally select one whole-room native group and confirm Main-control routing.
+Zones must be disjoint, belong to the same bridge and have identical supported
+color modes, Kelvin ranges and transition support. The optional aggregate must
+contain **exactly** their combined membership. Unknown roots/members are not Off:
+initialize and verify a uniform native On/Off state within each zone before
+enrolling. Different zones may have different power states.
+
+One entry owns the complete leaf set. The aggregate is only a native delivery
+address, not another zone or owner. The integration issues one native aggregate
+call only when every zone needs an identical normalized command and transition;
+otherwise it calls only the native zone groups needing updates. It never sends
+leaf light service calls, even on retry. Different zone calls are ordered, but
+not delayed by each preceding zone's full acknowledgment timeout. No atomic radio
+delivery or simultaneous physical response is promised.
+
+### Zone/whole Main and shared masks
+
+Each zone has its own **Main control**, storing ordinary On/Off, brightness and
+color. The compositor's **Main control** operates on all these intents in one
+durable update, rather than storing another overriding baseline.
+
+| Whole Main operation/state | Meaning |
+|---|---|
+| On state | At least one ordinary zone is On, not necessarily all physical bulbs |
+| Off state | All ordinary zones are Off |
+| Toggle | Any ordinary zone On: request all Off; otherwise request all On |
+| Turn On | Request every zone On; omitted brightness/color preserves each zone's values |
+| Set brightness/color | Normal HA Turn On semantics: request every zone On and set supplied fields |
+| Turn Off | Request every zone Off without clearing remembered brightness/color |
+| Mixed values | No average; `mixed_power`, `mixed_brightness`, `mixed_appearance`, `on_zone_count` and `zone_count` describe the ordinary intents |
+
+When ordinary colors differ, whole Main reports HA's `unknown` color mode with
+unset color values. HA can also hide its brightness value in this mode; the
+individual Main lights and Explain retain the actual values.
+
+Create shared masks with the same existing mask editor. Each mask has **one**
+activation, payload and optional renewable expiry, applied to every zone.
+An appearance-only circadian mask changes lit zones without waking dark ones.
+A higher-priority alarm with power/brightness/color enabled overrides all zones.
+A manual zone Off during that alarm is **remembered without hiding the alarm**.
+Releasing the alarm reveals each zone's latest ordinary intent and latest
+circadian contribution, not a pre-alarm snapshot. One mask Off releases its
+contribution everywhere; it is not a forced Off command. No zone-specific masks
+or optional Power aliases are created in multi-zone mode.
+
+Zone Main lights expose `role: normal`, `scope: zone`, and `zone_id`; whole Main
+exposes `role: normal`, `scope: whole`. Discover actual entity IDs in the registry.
+**Configure > Rename zone** changes display names without changing IDs, membership
+or stored intent. Zone/aggregate topology is fixed; recreate and review the entry
+to change it. Each zone has a delivery diagnostic sensor; Explain includes
+per-zone normals, resolutions, member IDs, authorization, attempts and errors,
+plus the latest delivery's native transport addresses.
+
+### Safety and commissioning
+
+Normal physical-switch automations, dashboards and scenes must call the zone or
+whole **Main** facades. There is no external command listener or automatic
+multi-zone intent adoption from telemetry. Direct native-group commands and bound
+remotes bypass composition and can visibly interrupt an alarm. A same-state
+physical command may produce no report, so it cannot reliably be remembered.
+Electrical power loss makes hardware unavailable; it does not prove ordinary Off.
+
+**User-confirmed availability policy:** an unknown/unavailable zone root or member
+blocks that entire zone, while healthy zones continue ordinary/shared-mask/alarm
+delivery through their native groups. No per-bulb fallback is used. Overall status
+is `degraded`, never `in_sync`, while a zone or the aggregate alias is unavailable.
+An unavailable alias alone does not block healthy zones. The aggregate is never
+used across a blocked zone, including retries; a command already sent cannot be recalled.
+Each member must confirm its own zone's desired result. Partial success retries
+only unresolved zones; no report is not
+an acknowledgment. Service exceptions remain failures even if telemetry matches.
+
+Unavailable zones retain latest durable ordinary and shared-mask intent. On
+reconnect, revalidate topology and resolve the **current** intent, including manual
+Off and mask expiry accepted during the outage. Existing On authorization may be
+used; reconnect reports never grant new authorization or infer ordinary intent.
+An active alarm still wins over remembered Off until it releases. Reconnecting an
+alias does not erase a zone's failed/unverified delivery status.
+Core may omit unavailable entities' membership/capability attributes. Frozen
+enrollment metadata is used only to prove isolation, never to authorize delivery
+to unavailable hardware. Current registry provenance and ownership remain mandatory;
+changed membership/capabilities, removed registry identities or otherwise unsafe
+topology block the whole compositor. Known-state external divergence still suspends it.
+First enrollment requires known uniform zones. Existing entries can restart with
+unavailable zones and intact registry identities using stored intent; no snapshot
+means setup fails rather than seeding unknown zones.
+
+After restart, On authorization comes from each zone's own known-On leaves,
+with a known zone root, never the aggregate root. Explicit zone On authorizes that zone, whole Main or
+force-On mask activation authorizes all zones, and Resume explicitly authorizes
+the whole compositor. Apply and Sync alone do not override startup protection.
+Existing mask restart/lease policies and config-edit activation preservation apply.
+
+Before live commissioning, back up configuration and stored intent, install a
+separately approved version and restart. Preserve unrelated notification entries.
+Remove conflicting ownership only after reviewing its consumers; this integration
+does not remove entries for you. Create the new entry **Apply Off**, discover
+facades, initialize ordinary intents and configure shared masks inactive. Retarget
+all normal writers and audit broad area/domain actions and direct bindings.
+Inspect Explain before deliberately enabling Apply/Resume. Verify alarm On, zone
+Off while the alarm stays visible, then alarm release leaving that zone Off.
+Observe every member and check restart/disconnect behavior before relying on it.
+Rollback requires disabling Apply and reviewing/restoring the previous input
+routing; never leave two output writers enabled.
+Older releases cannot read multi-zone intent snapshots: disable/remove the new
+entry before downgrading. Existing single-output entries require no conversion.
 
 ## Usage scenarios
 
@@ -248,7 +364,7 @@ the native MQTT group light entity**, including single-member groups; Light Mask
 never expands native group delivery into individual bulb service calls. Zigbee2MQTT
 owns the underlying radio transport; no atomicity or physical simultaneity is promised.
 Confirmation checks every leaf light; aggregate averages and
-"any member On" cannot establish success. Main control stores one common intent,
+"any member On" cannot establish success. In single-output mode Main control stores one common intent,
 not a snapshot of each bulb. Applying it can unify previously different member
 settings. Mixed On/Off at startup needs explicit On authorization before waking
 off members. Member divergence suspends group output even with no active masks.
@@ -282,14 +398,15 @@ component and restart HA before enrolling native groups. Existing supported
 individual-light and HA-group entries retain their configuration and intent.
 Native effects remain unsupported; use static color commands.
 
-Not supported in this release:
+Not supported:
 
 - Mixed-capability or unknown/vendor groups other than the recognized Zigbee2MQTT
   groups above, Lightener/Lightener Studio outputs, other masks, overlapping segment
   aliases, RGBW/RGBWW/white-mode endpoints, selecting native effects through masks,
   and flash actions.
-- Cross-output synchronization, group broadcast planning, automatic automation
-  migration, base-light replacement, or a visual composition preview.
+- Automatic automation migration, base-light replacement, arbitrary cross-entry
+  synchronization, or a visual composition preview. Native multi-zone broadcast
+  planning is opt-in in the 0.4.0b1 beta; it is not in stable 0.3.4.
 - Attributing every hardware report to a human or a specific external automation.
 
 Unsafe aggregates and duplicate owners are rejected. The independence-confirmation
@@ -316,7 +433,7 @@ Use explicit virtual entity IDs; manage areas, labels and exposure yourself.
 
 ## Manual installation
 
-1. Back up Home Assistant configuration. Build or obtain `light-masks-0.3.4.zip`
+1. Back up Home Assistant configuration. Build or obtain `light-masks-0.4.0b1.zip`
    (local builds are in `dist`) and extract it.
    Copy its `custom_components\light_masks` directory into the Home Assistant
    configuration directory's `custom_components` directory. Do not copy `.venv`,
@@ -348,11 +465,20 @@ brightness control, but an unchecked brightness contribution remains local.
 
 ## HACS installation and repository
 
-Once the repository is published and accessible to your HACS account, add
+Add the public repository
 `https://github.com/gigazet/ha_light_masks` under **HACS > Custom repositories**,
 category **Integration**, and download Light Masks. Restart HA, then follow setup
 above. HACS installs the integration directory; the manual-install ZIP is not a
 HACS `zip_release` asset. The minimum declared HA version is 2026.9.3.
+
+**Beta opt-in:** update repository information in HACS, choose **Redownload**,
+expand **Need a different version?**, and select the `v0.4.0b1` prerelease.
+Older HACS versions may require enabling beta versions first. Restart HA and
+verify that the installed integration version is `0.4.0b1` before configuring
+zones. Stable users can remain on `v0.3.4`; this beta is a GitHub prerelease, not
+the latest stable release. This is a custom-repository installation, not a new
+default HACS catalog listing. Follow the multi-zone commissioning and downgrade
+precautions above; do not downgrade with a multi-zone entry still enabled.
 
 The repository includes `hacs.json`, integration-local branding, an MIT license,
 and GitHub Actions for tests, Ruff, mypy, hassfest and HACS validation. This does
