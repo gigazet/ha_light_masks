@@ -224,11 +224,12 @@ async def z2m_output(hass, request):
 
 
 @pytest.fixture
-async def z2m_integration(hass, z2m_output, monkeypatch):
+async def z2m_integration(hass, z2m_output, monkeypatch, request):
     from custom_components.light_masks import controller
 
-    monkeypatch.setattr(controller, "ACK_TIMEOUT", 0.04)
-    monkeypatch.setattr(controller, "SETTLE_SECONDS", 0.01)
+    if getattr(request, "param", None) != "production":
+        monkeypatch.setattr(controller, "ACK_TIMEOUT", 0.04)
+        monkeypatch.setattr(controller, "SETTLE_SECONDS", 0.01)
     result = await hass.config_entries.flow.async_init("light_masks", context={"source": "user"})
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {"output": z2m_output.group.entity_id}

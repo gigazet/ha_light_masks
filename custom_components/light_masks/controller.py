@@ -35,6 +35,7 @@ from .storage import IntentStore
 
 _LOGGER = logging.getLogger(__name__)
 ACK_TIMEOUT = 3.0
+MULTI_ZONE_ACK_TIMEOUT = 5.0
 SETTLE_SECONDS = 0.75
 MAX_ATTEMPTS = 3
 
@@ -584,6 +585,7 @@ class Controller:
                     self._settle = self.hass.loop.call_later(SETTLE_SECONDS, self._schedule_settled)
 
     async def _deliver(self, desired: Intent, generation: int) -> None:
+        ack_timeout = MULTI_ZONE_ACK_TIMEOUT if self.engine.multi_zone else ACK_TIMEOUT
         desired_zones = self.desired_zones()
         transitions = (
             dict(self.transitions)
@@ -677,14 +679,14 @@ class Controller:
                         "Light Masks delivery %s attempt %d: %s", command.output, attempt, err
                     )
                 for zone in command.zones:
-                    deadlines[zone] = self.hass.loop.time() + command.transition + ACK_TIMEOUT
+                    deadlines[zone] = self.hass.loop.time() + command.transition + ack_timeout
             # Wait for transition completion even when intermediate reports match.
             while generation == self._generation and not self._blocked(desired):
                 # A no-report zone can still confirm while another zone is retried.
                 for zone in unresolved | unverified:
                     if (
                         self.zone_errors[zone] is None
-                        and self.hass.loop.time() >= deadlines[zone] - ACK_TIMEOUT
+                        and self.hass.loop.time() >= deadlines[zone] - ack_timeout
                         and self.zone_converged(zone, desired_zones[zone])
                     ):
                         unresolved.discard(zone)

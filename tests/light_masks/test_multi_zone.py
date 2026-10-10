@@ -59,11 +59,12 @@ async def begin_zones(hass, native):
 
 
 @pytest.fixture
-async def multi_entry(hass, native_zones, monkeypatch):
+async def multi_entry(hass, native_zones, monkeypatch, request):
     from custom_components.light_masks import controller
 
-    monkeypatch.setattr(controller, "ACK_TIMEOUT", 0.04)
-    monkeypatch.setattr(controller, "SETTLE_SECONDS", 0.01)
+    if getattr(request, "param", None) != "production":
+        monkeypatch.setattr(controller, "MULTI_ZONE_ACK_TIMEOUT", 0.04)
+        monkeypatch.setattr(controller, "SETTLE_SECONDS", 0.01)
     result = await begin_zones(hass, native_zones)
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {"aggregate": native_zones.aggregate.entity_id, "confirm": True}
@@ -900,7 +901,7 @@ async def test_multi_zone_calls_do_not_wait_for_previous_ack(
 ):
     from custom_components.light_masks import controller
 
-    monkeypatch.setattr(controller, "ACK_TIMEOUT", 0.5)
+    monkeypatch.setattr(controller, "MULTI_ZONE_ACK_TIMEOUT", 0.5)
     c = multi_entry.runtime_data
     for index, zone in enumerate(c.outputs):
         await c.command(zone, "on", {"brightness": 70 + index}, None)
@@ -966,6 +967,7 @@ async def test_multi_supersession_stops_queued_zone_dispatch(hass, native_zones,
     assert all(not m.is_on and not m.calls for m in native_zones.members)
 
 
+@pytest.mark.parametrize("multi_entry", [None, "production"], indirect=True)
 async def test_multi_transition_supersession_and_duplicate_reports(hass, native_zones, multi_entry):
     c = multi_entry.runtime_data
     await c.command("normal", "on", {"transition": 0.3}, None)
@@ -973,8 +975,10 @@ async def test_multi_transition_supersession_and_duplicate_reports(hass, native_
     async with asyncio.timeout(1):
         await native_zones.aggregate.started.wait()
     assert c.status == "pending"
+    started = hass.loop.time()
     await c.command("normal", "off", {}, None)
     await settle(hass, c)
+    assert hass.loop.time() - started < 1
     assert c.status == "in_sync"
     assert [kind for kind, _ in native_zones.aggregate.calls] == ["on", "off"]
     snapshot = c.engine.snapshot()
@@ -983,6 +987,158 @@ async def test_multi_transition_supersession_and_duplicate_reports(hass, native_
     await asyncio.sleep(0.05)
     assert c.engine.snapshot() == snapshot
     assert len(native_zones.aggregate.calls) == 2
+
+
+def report_native_group(group, payload):
+    group._attr_is_on = True
+    group._attr_brightness = payload.get("brightness", 128)
+    group._attr_color_temp_kelvin = payload.get("color_temp_kelvin", 4000)
+    group.async_write_ha_state()
+    group.report_members()
+
+
+@pytest.mark.parametrize("multi_entry", ["production"], indirect=True)
+async def test_multi_production_ack_complete_delayed_feedback(
+    hass, native_zones, multi_entry, monkeypatch
+):
+    from custom_components.light_masks import controller
+
+    assert controller.MULTI_ZONE_ACK_TIMEOUT == 5
+    assert controller.ACK_TIMEOUT == 3
+    assert controller.MAX_ATTEMPTS == 3
+    c = multi_entry.runtime_data
+    handles = []
+    for zone, group, brightness, delay in zip(
+        c.outputs, native_zones.groups, [77, 51, 102], [3.3, 3.53, 3.94], strict=True
+    ):
+        await c.command(
+            zone,
+            "on",
+            {"brightness": brightness, "color_temp_kelvin": 3000, "transition": 0.2},
+            None,
+        )
+        group.report = False
+        original = group.async_turn_on
+
+        async def delayed_call(*, group=group, original=original, delay=delay, **kwargs):
+            await original(**kwargs)
+            handles.append(hass.loop.call_later(delay, report_native_group, group, kwargs))
+
+        monkeypatch.setattr(group, "async_turn_on", delayed_call)
+    try:
+        started = hass.loop.time()
+        await c.set_apply(True)
+        await settle(hass, c, polls=600)
+        elapsed = hass.loop.time() - started
+        assert 3.94 <= elapsed < 5
+        assert c.status == "in_sync"
+        assert list(c.zone_status.values()) == ["in_sync"] * 3
+        assert list(c.zone_attempts.values()) == [1] * 3
+        assert c.transports == [g.entity_id for g in native_zones.groups]
+        assert not native_zones.aggregate.calls
+        assert not c._delivery_failures
+        assert all(not m.calls for m in native_zones.members)
+    finally:
+        for handle in handles:
+            handle.cancel()
+
+
+@pytest.mark.parametrize("multi_entry", ["production"], indirect=True)
+async def test_multi_production_ack_late_terminal_latch(hass, native_zones, multi_entry):
+    c = multi_entry.runtime_data
+    group = native_zones.aggregate
+    group.report = False
+    await c.command("normal", "on", {"transition": 0.2}, None)
+    started = hass.loop.time()
+    await c.set_apply(True)
+    await settle(hass, c, polls=600)
+    assert 5.2 <= hass.loop.time() - started < 6
+    assert c.status == "unverified"
+    assert list(c.zone_attempts.values()) == [1] * 3
+    assert c._delivery_failures == dict.fromkeys(c.outputs, "unverified")
+    report_native_group(group, {})
+    await asyncio.sleep(0.8)
+    await hass.async_block_till_done()
+    assert c.converged(c.desired())
+    assert c.status == "unverified"
+    assert len(group.calls) == 1
+    assert not any(g.calls for g in native_zones.groups)
+    assert all(not m.calls for m in native_zones.members)
+
+
+@pytest.mark.parametrize("multi_entry", ["production"], indirect=True)
+async def test_multi_production_ack_partial_selective_retry(
+    hass, native_zones, multi_entry, monkeypatch
+):
+    c = multi_entry.runtime_data
+    last = native_zones.groups[-1]
+    last.members[-1].report = False
+    original = last.async_turn_on
+    retry_times = []
+
+    async def complete_on_retry(**kwargs):
+        retry_times.append(hass.loop.time())
+        last.members[-1].report = True
+        await original(**kwargs)
+
+    monkeypatch.setattr(last, "async_turn_on", complete_on_retry)
+    await c.command("normal", "on", {"transition": 0.2}, None)
+    started = hass.loop.time()
+    await c.set_apply(True)
+    await settle(hass, c, polls=600)
+    assert 5.2 <= retry_times[0] - started < 6
+    assert c.status == "in_sync"
+    assert list(c.zone_attempts.values()) == [1, 1, 2]
+    assert c.transports == [native_zones.aggregate.entity_id, last.entity_id]
+    assert all(not m.calls for m in native_zones.members)
+
+
+@pytest.mark.parametrize("multi_entry", ["production"], indirect=True)
+async def test_multi_production_ack_service_errors_still_three_attempts(
+    hass, native_zones, multi_entry
+):
+    c = multi_entry.runtime_data
+    group = native_zones.groups[0]
+    group.fail_after_report = True
+    await c.command(next(iter(c.outputs)), "on", {}, None)
+    started = hass.loop.time()
+    await c.set_apply(True)
+    await settle(hass, c, polls=1800)
+    assert 15 <= hass.loop.time() - started < 18
+    assert c.status == "failed"
+    assert list(c.zone_attempts.values()) == [3, 0, 0]
+    assert len(group.calls) == 3
+    assert c.zone_errors[next(iter(c.outputs))]
+    assert not native_zones.aggregate.calls
+    assert not any(g.calls for g in native_zones.groups[1:])
+    assert all(not m.calls for m in native_zones.members)
+
+
+@pytest.mark.parametrize("multi_entry", ["production"], indirect=True)
+async def test_multi_production_ack_waits_for_transition(hass, native_zones, multi_entry):
+    c = multi_entry.runtime_data
+    await c.command("normal", "on", {"transition": 0.2}, None)
+    started = hass.loop.time()
+    await c.set_apply(True)
+    await settle(hass, c)
+    assert 0.2 <= hass.loop.time() - started < 1
+    assert c.status == "in_sync"
+    assert len(native_zones.aggregate.calls) == 1
+
+
+@pytest.mark.parametrize("z2m_integration", ["production"], indirect=True)
+async def test_single_native_production_ack_stays_three_seconds(hass, z2m_output, z2m_integration):
+    c = z2m_integration.runtime_data
+    z2m_output.group.report = False
+    await c.command("normal", "on", {"transition": 0.2}, None)
+    started = hass.loop.time()
+    await c.set_apply(True)
+    await settle(hass, c, polls=500)
+    assert 3.2 <= hass.loop.time() - started < 4.5
+    assert c.status == "unverified"
+    assert c.attempts == 1
+    assert len(z2m_output.group.calls) == 1
+    assert all(not m.calls for m in z2m_output.members)
 
 
 async def test_multi_bad_feedback_explain_remains_available(hass, native_zones, multi_entry):

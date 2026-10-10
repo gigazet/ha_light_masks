@@ -25,8 +25,8 @@ async def call(hass, entity_id, service="turn_on", **kwargs):
     await asyncio.sleep(0)
 
 
-async def settle(hass, controller):
-    for _ in range(100):
+async def settle(hass, controller, *, polls=100):
+    for _ in range(polls):
         await asyncio.sleep(0.01)
         await hass.async_block_till_done()
         if not controller._busy and not controller._wake.is_set():

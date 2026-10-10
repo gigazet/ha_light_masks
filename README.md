@@ -9,7 +9,7 @@ and a finished appliance show a notification on the **same light**.
 Each automation talks to its own normal-looking virtual light. Light Masks combines
 their requests and sends one resolved result to the real bulb or compatible light group.
 
-**Beta: 0.4.0b2** · **Home Assistant: 2026.9.3 development baseline** ·
+**Beta: 0.4.0b3** · **Home Assistant: 2026.9.3 development baseline** ·
 **UI: English / Ukrainian** · **License: [MIT](LICENSE)**
 
 [Get started](#get-started) · [Terminology](#terminology) ·
@@ -101,7 +101,7 @@ not a snapshot captured before the notification.
 | **Shadow mode** | Apply is Off. Requests are stored and combined, but not sent to the base. |
 | **Delivery status** | Whether physical feedback agrees with the desired result. Different from a mask's activation or permissions. |
 
-## Multi-zone native groups (0.4.0b2 beta)
+## Multi-zone native groups (0.4.0b3 beta)
 
 **Opt-in beta feature; not included in stable 0.3.4.** Existing
 single-output entries keep their configuration, entity IDs, saved intent and
@@ -111,6 +111,13 @@ Beta 2 fixes late member confirmation being ignored while another zone retries.
 Provisionally unverified zones remain watched within the active delivery's bounded
 retry window, without additional commands. Terminal failed/unverified latches
 after the writer finishes are unchanged.
+
+Beta 3 increases only multi-zone confirmation to **5 seconds plus the requested
+transition**, measured after each native HA service call returns. Single-output
+entries retain **3 seconds plus transition**, including native-group outputs.
+Complete matching member feedback still finishes early after transition completion.
+No-report zones are not resent merely to extend observation; feedback arriving
+after the writer finishes does not automatically clear terminal multi-zone latches.
 
 Choose **Multi-zone native Zigbee2MQTT compositor** when adding an integration.
 Leave Base empty (the optional Power alias is ignored in this mode). Add at least
@@ -411,7 +418,7 @@ Not supported:
   and flash actions.
 - Automatic automation migration, base-light replacement, arbitrary cross-entry
   synchronization, or a visual composition preview. Native multi-zone broadcast
-  planning is opt-in in the 0.4.0b2 beta; it is not in stable 0.3.4.
+  planning is opt-in in the 0.4.0b3 beta; it is not in stable 0.3.4.
 - Attributing every hardware report to a human or a specific external automation.
 
 Unsafe aggregates and duplicate owners are rejected. The independence-confirmation
@@ -438,7 +445,7 @@ Use explicit virtual entity IDs; manage areas, labels and exposure yourself.
 
 ## Manual installation
 
-1. Back up Home Assistant configuration. Build or obtain `light-masks-0.4.0b2.zip`
+1. Back up Home Assistant configuration. Build or obtain `light-masks-0.4.0b3.zip`
    (local builds are in `dist`) and extract it.
    Copy its `custom_components\light_masks` directory into the Home Assistant
    configuration directory's `custom_components` directory. Do not copy `.venv`,
@@ -477,9 +484,9 @@ above. HACS installs the integration directory; the manual-install ZIP is not a
 HACS `zip_release` asset. The minimum declared HA version is 2026.9.3.
 
 **Beta opt-in:** update repository information in HACS, choose **Redownload**,
-expand **Need a different version?**, and select the `v0.4.0b2` prerelease.
+expand **Need a different version?**, and select the `v0.4.0b3` prerelease.
 Older HACS versions may require enabling beta versions first. Restart HA and
-verify that the installed integration version is `0.4.0b2` before configuring
+verify that the installed integration version is `0.4.0b3` before configuring
 zones. Stable users can remain on `v0.3.4`; this beta is a GitHub prerelease, not
 the latest stable release. This is a custom-repository installation, not a new
 default HACS catalog listing. Follow the multi-zone commissioning and downgrade
@@ -605,6 +612,11 @@ additional output calls; superseded queued work is discarded. There are at most
 three attempts per effective result, with transition-aware confirmation windows,
 not unlimited retrying. Retries wait through the acknowledgement window; no
 exponential backoff or separate 50 ms debounce is implemented.
+The per-attempt window is 5 seconds for multi-zone entries and 3 seconds for
+single-output entries, plus transition time after the native service returns.
+Three attempts are a retry ceiling, not three guaranteed observation windows.
+The separate service-call watchdog remains 15 seconds plus transition, and the
+0.75-second observation settlement delay is not extra acknowledgment grace.
 
 For an individual output, an external settled change with no active masks can
 become the normal baseline. With active masks, or for any group-member divergence,

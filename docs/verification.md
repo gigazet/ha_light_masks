@@ -4,6 +4,31 @@ This public record omits household names, entity/device identifiers, room
 locations and test dates. Pilot mask names below are generic aliases; reported
 test measurements and coverage limits are preserved.
 
+## 0.4.0b3 beta multi-zone confirmation timing
+
+The user-confirmed timing policy increases the multi-zone per-attempt
+acknowledgment window from 3 to 5 seconds, plus the requested transition after
+the native HA service call returns. Single-output entries, including native-group
+outputs, retain 3 seconds. The maximum remains three attempts; no-report zones
+are not resent to obtain extra observation time. Early completion, supersession,
+service-error handling and terminal multi-zone failure latches are unchanged.
+There is no separate late-report grace state machine or new configuration field.
+
+Seven additional cases use unmodified production timing defaults: native-zone
+feedback delayed by 3.3, 3.53 and 3.94 seconds; complete feedback after the
+5-second-plus-transition cutoff remaining terminally unverified; selective
+partial-feedback retry; three service-error attempts; transition completion;
+prompt supersession; and the original single-output 3-second window.
+The six beta 2 late-feedback/selective-retry regressions remain covered.
+These are real Core synthetic-light tests, not live-radio qualification.
+A finite timeout still cannot guarantee confirmation under arbitrary congestion.
+
+The isolated, branding-free release tree passes 212 tests, Ruff lint/format and
+strict mypy. All 64 multi-zone-module cases pass, including the single-output
+production-timing case. The full development suite passes 217 tests, including
+five separate pending branding tests. Five upstream deprecation warnings remain.
+No live Home Assistant changes are performed by this release process.
+
 ## 0.4.0b2 beta late multi-zone confirmation correction
 
 A deterministic regression reproduces a no-report zone becoming permanently
