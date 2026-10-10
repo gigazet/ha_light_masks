@@ -610,6 +610,7 @@ class Controller:
             self._confirm()
             return
         unverified: set[str] = set()
+        deadlines: dict[str, float] = {}
         for attempt in range(1, MAX_ATTEMPTS + 1):
             if generation != self._generation or self._blocked(desired):
                 return
@@ -639,7 +640,6 @@ class Controller:
                 zone: tuple(self.hass.states.get(member) for member in self.zone_members[zone])
                 for zone in unresolved
             }
-            deadlines: dict[str, float] = {}
             for command in plan:
                 if generation != self._generation or self._blocked(desired):
                     return
@@ -680,6 +680,18 @@ class Controller:
                     deadlines[zone] = self.hass.loop.time() + command.transition + ACK_TIMEOUT
             # Wait for transition completion even when intermediate reports match.
             while generation == self._generation and not self._blocked(desired):
+                # A no-report zone can still confirm while another zone is retried.
+                for zone in unresolved | unverified:
+                    if (
+                        self.zone_errors[zone] is None
+                        and self.hass.loop.time() >= deadlines[zone] - ACK_TIMEOUT
+                        and self.zone_converged(zone, desired_zones[zone])
+                    ):
+                        unresolved.discard(zone)
+                        unverified.discard(zone)
+                        self.zone_status[zone] = "in_sync"
+                if not unresolved and not unverified:
+                    break
                 remaining = max(deadlines.values()) - self.hass.loop.time()
                 if remaining <= 0:
                     break
@@ -691,16 +703,6 @@ class Controller:
                 self._observed.clear()
                 if generation != self._generation or self._blocked(desired):
                     return
-                for zone in tuple(unresolved):
-                    if (
-                        self.zone_errors[zone] is None
-                        and self.hass.loop.time() >= deadlines[zone] - ACK_TIMEOUT
-                        and self.zone_converged(zone, desired_zones[zone])
-                    ):
-                        unresolved.remove(zone)
-                        self.zone_status[zone] = "in_sync"
-                if not unresolved:
-                    break
             if generation != self._generation or self._blocked(desired):
                 return
             # No report is not an acknowledgement. Do not fight unknown device state.

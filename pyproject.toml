@@ -1,6 +1,6 @@
 [project]
 name = "ha-light-masks"
-version = "0.4.0b1"
+version = "0.4.0b2"
 description = "Independent light intents composed through Home Assistant virtual lights"
 requires-python = ">=3.14.2"
 

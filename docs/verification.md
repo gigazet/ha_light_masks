@@ -4,6 +4,29 @@ This public record omits household names, entity/device identifiers, room
 locations and test dates. Pilot mask names below are generic aliases; reported
 test measurements and coverage limits are preserved.
 
+## 0.4.0b2 beta late multi-zone confirmation correction
+
+A deterministic regression reproduces a no-report zone becoming permanently
+`unverified` despite complete matching feedback arriving during another zone's
+selective retry. The retry loop previously removed that zone from its confirmation
+watch set after the first timeout.
+
+The writer now retains the original transition deadline and continues checking
+provisionally unverified zones throughout the active delivery's bounded retry
+window, including after the retried zone confirms. It does not resend commands to
+the no-report zone or extend retry limits. Six regression cases cover complete,
+partial and root-only late feedback, both before and after the other zone's retry
+acknowledgment. Only complete matching leaf feedback confirms delivery.
+Terminal failed/unverified latches after the writer finishes, explicit retry
+semantics, startup authorization and availability safeguards remain unchanged.
+
+This correction is not included in published 0.4.0b1. The isolated beta 2 tree
+passes 205 tests and excludes the five pending branding tests and related artwork
+changes. Its Ruff lint/format and strict mypy checks pass.
+All 57 multi-zone cases and the full 210-test development suite pass (the latter
+includes five separate pending branding tests). Ruff lint/format, strict mypy and
+the Git whitespace check pass; the same five upstream warnings remain.
+
 ## 0.4.0b1 beta multi-zone native compositor
 
 199 tests pass in the isolated beta release tree against Core 2026.9.3 /

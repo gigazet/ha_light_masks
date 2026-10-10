@@ -9,7 +9,7 @@ and a finished appliance show a notification on the **same light**.
 Each automation talks to its own normal-looking virtual light. Light Masks combines
 their requests and sends one resolved result to the real bulb or compatible light group.
 
-**Beta: 0.4.0b1** · **Home Assistant: 2026.9.3 development baseline** ·
+**Beta: 0.4.0b2** · **Home Assistant: 2026.9.3 development baseline** ·
 **UI: English / Ukrainian** · **License: [MIT](LICENSE)**
 
 [Get started](#get-started) · [Terminology](#terminology) ·
@@ -101,11 +101,16 @@ not a snapshot captured before the notification.
 | **Shadow mode** | Apply is Off. Requests are stored and combined, but not sent to the base. |
 | **Delivery status** | Whether physical feedback agrees with the desired result. Different from a mask's activation or permissions. |
 
-## Multi-zone native groups (0.4.0b1 beta)
+## Multi-zone native groups (0.4.0b2 beta)
 
 **Opt-in beta feature; not included in stable 0.3.4.** Existing
 single-output entries keep their configuration, entity IDs, saved intent and
 reconciliation rules. There is no automatic conversion or live migration.
+
+Beta 2 fixes late member confirmation being ignored while another zone retries.
+Provisionally unverified zones remain watched within the active delivery's bounded
+retry window, without additional commands. Terminal failed/unverified latches
+after the writer finishes are unchanged.
 
 Choose **Multi-zone native Zigbee2MQTT compositor** when adding an integration.
 Leave Base empty (the optional Power alias is ignored in this mode). Add at least
@@ -406,7 +411,7 @@ Not supported:
   and flash actions.
 - Automatic automation migration, base-light replacement, arbitrary cross-entry
   synchronization, or a visual composition preview. Native multi-zone broadcast
-  planning is opt-in in the 0.4.0b1 beta; it is not in stable 0.3.4.
+  planning is opt-in in the 0.4.0b2 beta; it is not in stable 0.3.4.
 - Attributing every hardware report to a human or a specific external automation.
 
 Unsafe aggregates and duplicate owners are rejected. The independence-confirmation
@@ -433,7 +438,7 @@ Use explicit virtual entity IDs; manage areas, labels and exposure yourself.
 
 ## Manual installation
 
-1. Back up Home Assistant configuration. Build or obtain `light-masks-0.4.0b1.zip`
+1. Back up Home Assistant configuration. Build or obtain `light-masks-0.4.0b2.zip`
    (local builds are in `dist`) and extract it.
    Copy its `custom_components\light_masks` directory into the Home Assistant
    configuration directory's `custom_components` directory. Do not copy `.venv`,
@@ -472,9 +477,9 @@ above. HACS installs the integration directory; the manual-install ZIP is not a
 HACS `zip_release` asset. The minimum declared HA version is 2026.9.3.
 
 **Beta opt-in:** update repository information in HACS, choose **Redownload**,
-expand **Need a different version?**, and select the `v0.4.0b1` prerelease.
+expand **Need a different version?**, and select the `v0.4.0b2` prerelease.
 Older HACS versions may require enabling beta versions first. Restart HA and
-verify that the installed integration version is `0.4.0b1` before configuring
+verify that the installed integration version is `0.4.0b2` before configuring
 zones. Stable users can remain on `v0.3.4`; this beta is a GitHub prerelease, not
 the latest stable release. This is a custom-repository installation, not a new
 default HACS catalog listing. Follow the multi-zone commissioning and downgrade

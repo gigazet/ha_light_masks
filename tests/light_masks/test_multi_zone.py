@@ -837,6 +837,64 @@ async def test_multi_no_report_is_unverified_not_success(hass, native_zones, mul
     assert c.status == "unverified"
 
 
+@pytest.mark.parametrize("late_feedback", ["complete", "partial", "root_only"])
+@pytest.mark.parametrize("after_retry_ack", [False, True])
+async def test_multi_late_ack_during_other_zone_retry(
+    hass, native_zones, multi_entry, monkeypatch, late_feedback, after_retry_ack
+):
+    c = multi_entry.runtime_data
+    zones = list(c.outputs)
+    for index, zone in enumerate(zones):
+        await c.command(
+            zone,
+            "on",
+            {"brightness": 70 + index, "transition": 0.0 if index == 1 else 0.02},
+            None,
+        )
+    middle, last = native_zones.groups[1:]
+    middle.members[-1].report = False
+    last.report = False
+    original = middle.async_turn_on
+
+    def report_late():
+        if after_retry_ack:
+            assert c.zone_status[zones[1]] == "in_sync"
+        last._attr_is_on = True
+        last._attr_brightness = 72
+        last.async_write_ha_state()
+        for index, member in enumerate(last.members):
+            member.report = late_feedback == "complete" or (
+                late_feedback == "partial" and index == 0
+            )
+        last.report_members()
+
+    async def retry_with_late_feedback(**kwargs):
+        if middle.calls:
+            assert c.zone_status[zones[-1]] == "unverified"
+            middle.members[-1].report = True
+            if after_retry_ack:
+                hass.loop.call_later(0.01, report_late)
+            else:
+                report_late()
+        await original(**kwargs)
+
+    monkeypatch.setattr(middle, "async_turn_on", retry_with_late_feedback)
+    await c.set_apply(True)
+    await settle(hass, c)
+    assert c.transports == [
+        *(group.entity_id for group in native_zones.groups),
+        middle.entity_id,
+    ]
+    assert [len(group.calls) for group in native_zones.groups] == [1, 2, 1]
+    expected = "in_sync" if late_feedback == "complete" else "unverified"
+    assert c.status == expected
+    assert list(c.zone_status.values()) == ["in_sync", "in_sync", expected]
+    assert c.diagnostics()["zones"][zones[-1]]["status"] == expected
+    assert not c.engine.suspended
+    assert not native_zones.aggregate.calls
+    assert all(not member.calls for member in native_zones.members)
+
+
 async def test_multi_zone_calls_do_not_wait_for_previous_ack(
     hass, native_zones, multi_entry, monkeypatch
 ):
