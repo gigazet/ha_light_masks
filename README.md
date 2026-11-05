@@ -36,8 +36,18 @@ every trigger.
 4. Try the virtual lights with **Apply Off**. Inspect
    [Explain](#diagnostic-actions) to see which request wins without changing the bulb.
 5. Audit competing base/group writers, then enable **Apply to output**.
-   If startup protection is holding an On request, review the desired state before
-   pressing **Resume**: it may turn the light on.
+   The calculated state is authoritative, including On after restart or power
+   recovery. Review it before enabling Apply.
+
+### Automatic recovery (unreleased)
+
+With Apply enabled, settled external changes are corrected automatically instead
+of suspending control. Main control always retains ordinary intent; physical
+feedback does not overwrite it. Reconnecting outputs and Home Assistant restarts
+automatically restore the **current calculated state, including On**.
+The Restore control / Resume button is removed, including its registry entry;
+older saved suspension flags are migrated away. Apply Off remains strictly
+non-writing. Storage and unsafe-topology faults still require correction.
 
 ## How it works
 
@@ -104,13 +114,14 @@ not a snapshot captured before the notification.
 ## Multi-zone native groups (0.4.0b3 beta)
 
 **Opt-in beta feature; not included in stable 0.3.4.** Existing
-single-output entries keep their configuration, entity IDs, saved intent and
-reconciliation rules. There is no automatic conversion or live migration.
+single-output entries keep their configuration, entity IDs and saved intent.
+There is no automatic conversion or live migration to multi-zone mode.
 
 Beta 2 fixes late member confirmation being ignored while another zone retries.
 Provisionally unverified zones remain watched within the active delivery's bounded
 retry window, without additional commands. Terminal failed/unverified latches
-after the writer finishes are unchanged.
+after the writer finishes stop repeated writes until an explicit retry/new command
+or genuine recovery of the affected zone.
 
 Beta 3 increases only multi-zone confirmation to **5 seconds plus the requested
 transition**, measured after each native HA service call returns. Single-output
@@ -172,7 +183,7 @@ exposes `role: normal`, `scope: whole`. Discover actual entity IDs in the regist
 **Configure > Rename zone** changes display names without changing IDs, membership
 or stored intent. Zone/aggregate topology is fixed; recreate and review the entry
 to change it. Each zone has a delivery diagnostic sensor; Explain includes
-per-zone normals, resolutions, member IDs, authorization, attempts and errors,
+per-zone normals, resolutions, member IDs, attempts and errors,
 plus the latest delivery's native transport addresses.
 
 ### Safety and commissioning
@@ -196,23 +207,22 @@ an acknowledgment. Service exceptions remain failures even if telemetry matches.
 
 Unavailable zones retain latest durable ordinary and shared-mask intent. On
 reconnect, revalidate topology and resolve the **current** intent, including manual
-Off and mask expiry accepted during the outage. Existing On authorization may be
-used; reconnect reports never grant new authorization or infer ordinary intent.
+Off and mask expiry accepted during the outage. This may turn a recovered zone
+On; reconnect reports never become ordinary intent.
 An active alarm still wins over remembered Off until it releases. Reconnecting an
 alias does not erase a zone's failed/unverified delivery status.
 Core may omit unavailable entities' membership/capability attributes. Frozen
 enrollment metadata is used only to prove isolation, never to authorize delivery
 to unavailable hardware. Current registry provenance and ownership remain mandatory;
 changed membership/capabilities, removed registry identities or otherwise unsafe
-topology block the whole compositor. Known-state external divergence still suspends it.
+topology block the whole compositor. Settled physical divergence triggers bounded
+automatic reconciliation instead of persistent suspension.
 First enrollment requires known uniform zones. Existing entries can restart with
 unavailable zones and intact registry identities using stored intent; no snapshot
 means setup fails rather than seeding unknown zones.
 
-After restart, On authorization comes from each zone's own known-On leaves,
-with a known zone root, never the aggregate root. Explicit zone On authorizes that zone, whole Main or
-force-On mask activation authorizes all zones, and Resume explicitly authorizes
-the whole compositor. Apply and Sync alone do not override startup protection.
+After restart, saved Apply and calculated intent determine delivery, including On.
+Observed-off members do not impose an extra manual authorization gate.
 Existing mask restart/lease policies and config-edit activation preservation apply.
 
 Before live commissioning, back up configuration and stored intent, install a
@@ -221,7 +231,7 @@ Remove conflicting ownership only after reviewing its consumers; this integratio
 does not remove entries for you. Create the new entry **Apply Off**, discover
 facades, initialize ordinary intents and configure shared masks inactive. Retarget
 all normal writers and audit broad area/domain actions and direct bindings.
-Inspect Explain before deliberately enabling Apply/Resume. Verify alarm On, zone
+Inspect Explain before deliberately enabling Apply. Verify alarm On, zone
 Off while the alarm stays visible, then alarm release leaving that zone Off.
 Observe every member and check restart/disconnect behavior before relying on it.
 Rollback requires disabling Apply and reviewing/restoring the previous input
@@ -355,7 +365,8 @@ immediately. Ordinary new masks need no legacy setting.
 ## Compatibility and boundaries
 
 The development baseline is **Home Assistant Core 2026.9.3 / Python 3.14.7**.
-No earlier or later Core version is qualified. The integration uses native config
+The complete synthetic suite also passes on **Core 2026.10.4**. Other versions
+and live hardware remain unqualified. The integration uses native config
 subentries and has no additional runtime pip requirements.
 
 Supported outputs are individual lights, registered Home Assistant light groups,
@@ -378,8 +389,8 @@ owns the underlying radio transport; no atomicity or physical simultaneity is pr
 Confirmation checks every leaf light; aggregate averages and
 "any member On" cannot establish success. In single-output mode Main control stores one common intent,
 not a snapshot of each bulb. Applying it can unify previously different member
-settings. Mixed On/Off at startup needs explicit On authorization before waking
-off members. Member divergence suspends group output even with no active masks.
+settings. With Apply enabled, mixed On/Off members are reconciled to calculated
+intent at startup and after settled external changes, even with no active masks.
 Membership edits cannot cancel a group command already dispatched.
 
 ### Zigbee2MQTT groups (0.3.4)
@@ -542,7 +553,7 @@ remaining placeholder as an installation problem.
 **Configure > Name and main control** shows the fixed base and explains which
 entity ordinary automations should target. Only the name is editable here,
 including when the base is unavailable. Renaming does not change entity IDs,
-intents, Apply or On authorization. To use another base, create a new entry and
+intents, Apply or safety protections. To use another base, create a new entry and
 deliberately retarget its consumers. The old entry/output is not changed for you.
 
 Mask name, priority and channel edits preserve identity, independent values,
@@ -592,14 +603,15 @@ HA Store normally logs and swallows some write failures. `IntentStore` converts
 those failures to explicit errors, and rejects acceptance during shutdown or
 read-only operation. This small private-API adapter is covered against the pinned
 Core version and must be reviewed when upgrading Core. A storage failure rejects
-the command, blocks output and raises a Repair; fix storage, Resume, then resubmit
+the command, blocks output and raises a Repair; fix storage, use the
+**Retry after fixing a fault** action or reload, then resubmit
 the rejected command.
 
 Main control intent and operating mode persist. Mask values persist, but activation
 after a **restart or manual reload** restores only when **Restore activation** is
 enabled. Successful configuration-edit reloads instead preserve current activation
 and deadlines, including other non-restoring masks. Expired leases never reactivate.
-Same-output edits retain existing power-authorization and safety barriers.
+Same-output edits retain existing safety barriers.
 Entity identities survive ordinary reloads; a failed reload does not leave a
 state-preservation handoff for a later manual retry.
 
@@ -610,23 +622,24 @@ timer releases runtime expirations without polling the device. Expiry uses an
 immediate transition request; actual device timing is not guaranteed. Editing
 duration does not recalculate an existing retained lease.
 
-Startup cannot replay a restored On into an observed-off output without new
-authorization. An explicit normal On, an explicit advanced force-on activation,
-or Resume authorizes On. Ordinary appearance-mask updates do not. An initial
-unavailable endpoint delays integration setup; once loaded, virtual entities
-continue accepting intents during outages.
+When Apply is enabled, startup and availability recovery restore current calculated
+intent even if the physical output currently reports Off. No extra On authorization
+or button press is required. An initially unavailable single-output endpoint delays
+setup; existing multi-zone entries can restore with unavailable zones and frozen
+enrollment metadata. Once loaded, virtual entities keep accepting durable intents
+during outages. Recovery uses the latest intent, not the pre-outage command.
 
 | Control / status | Meaning |
 |---|---|
 | Apply Off / Shadow | Store and resolve only. Does not undo an already-dispatched command. |
-| Apply On | Deliver current intent subject to startup and safety barriers. |
-| Resume | Revalidate, clear suspension and authorize On. **May wake the light** when Apply is enabled. |
-| Sync | Retry current result; does not clear suspension or authorize startup On. |
+| Apply On | Automatically deliver current calculated intent, including On after restart/recovery, subject to safety barriers. |
+| Retry after fixing a fault (`light_masks.resume`) | Compatibility management action: revalidate topology and persist mode before retrying. Not needed for normal recovery. |
+| Sync | Retry current result; does not clear storage or unsafe-topology faults. |
 | Pending | Physical delivery or confirmation is underway. |
 | In sync | Every output member reports the normalized desired state within tolerance. Not independent proof of emitted light. |
 | Unverified | A call returned but no confirming state report arrived; automatic retries stop. |
 | Failed | Bounded delivery failed, storage failed, or the endpoint became unsafe. Inspect diagnostics/Repairs. |
-| Suspended after external change | Output changed unexpectedly while masks were active, or a group member diverged; intents remain intact and rendering pauses. |
+| Unavailable / Degraded | Defer unavailable hardware; healthy multi-zone outputs continue through native groups. |
 
 One replace-latest writer serializes physical calls. Hidden changes cause no
 additional output calls; superseded queued work is discarded. There are at most
@@ -639,11 +652,15 @@ Three attempts are a retry ceiling, not three guaranteed observation windows.
 The separate service-call watchdog remains 15 seconds plus transition, and the
 0.75-second observation settlement delay is not extra acknowledgment grace.
 
-For an individual output, an external settled change with no active masks can
-become the normal baseline. With active masks, or for any group-member divergence,
-it suspends output instead of copying notification color into Main control.
-An outage defers delivery until every member is available; previously authorized
-intent can then resume. Endpoint faults remain blocked until reviewed and resumed.
+Settled external changes never become the ordinary baseline. With Apply enabled,
+the existing writer restores calculated intent. To avoid an endless fight with
+competing controls, at most **three reconciliation episodes per rolling 60 seconds**
+are started; further divergent outputs are latched Failed with a Repair. Each
+episode still has the three-attempt delivery limit. Stop competing writers, then
+use Sync or submit a new virtual command to retry. Actual recovery clears only
+the affected zones' delivery failures; an aggregate alias reconnect does not clear
+other zone failures. Storage/topology faults remain blocked until corrected.
+Apply Off never repairs external changes or reconnects by writing to hardware.
 Changes during in-flight transitions cannot always be identified as
 external; exclusive targeting and hardware qualification remain necessary.
 
@@ -672,7 +689,7 @@ user context is also subject to this restriction. Ordinary virtual-light actions
 continue to use Home Assistant's normal entity permissions.
 
 Explain and downloadable integration diagnostics report intents, channel winners,
-desired/observed values, revisions, attempts and power authorization. Diagnostic
+desired/observed values, revisions, attempts and delivery errors. Diagnostic
 data is scoped to this compositor, not the entire home, but may still contain
 household-identifying entity IDs and light state. Review and redact diagnostics
 before attaching them to a public issue.
@@ -691,7 +708,8 @@ only after no remaining Light Masks entries or consumers need it.
 Use `uv sync --group ha` with the checked-in `uv.lock`, then:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\light_masks -q --timeout=20
+.\.venv\Scripts\python.exe -m pytest tests\light_masks -q --timeout=20 --cov=custom_components.light_masks --cov-branch
+.\.venv\Scripts\python.exe -m coverage report --include="custom_components\light_masks\config_flow.py" --fail-under=100
 .\.venv\Scripts\ruff.exe check custom_components tests scripts
 .\.venv\Scripts\ruff.exe format --check custom_components tests scripts
 .\.venv\Scripts\mypy.exe
@@ -718,8 +736,8 @@ This is **not** a full Linux process/startup test or hardware qualification.
 
 The suite covers arbitration, leases, atomic toggles, RGB-to-XY normalization,
 producer-local relative brightness, hidden-update suppression, coalescing behind
-blocked I/O, failed/no-report delivery, real atomic-write failures, startup power
-protection, external-change suspension/adoption, mask lifecycle, reload cleanup,
+blocked I/O, failed/no-report delivery, real atomic-write failures, automatic startup
+and outage recovery, external-change reconciliation/conflict limits, mask lifecycle, reload cleanup,
 scene restoration, action metadata and translation structure. Configure coverage
 includes device visibility/capabilities, stable identities, independent retained
 state, deadline preservation, confirmed removal, overlapping reloads, failed
@@ -739,6 +757,22 @@ Relative brightness uses Core's standard preprocessing. Sequential steps operate
 on the targeted producer, not the physical output. Concurrent relative steps to
 the same virtual light can be normalized by Core before the intent lock; do not
 treat them as an atomic counter. Separate producers should use separate masks.
+
+### Quality target
+
+The applicable Home Assistant **Bronze engineering rules** are the minimum target,
+not an official Core quality-tier award for this custom integration.
+All config/options/subentry fields have descriptions in English and Ukrainian.
+The config flow has a CI-enforced **100% statement and branch coverage** gate,
+including error-to-success recovery and entry identity checks. Runtime controllers
+are typed and stored on `ConfigEntry.runtime_data`; configuration reload context
+is task-local and cleared before starting workers.
+
+The integration is event-driven (no polling interval applies), declares no external
+runtime Python requirements, and provides no custom automation triggers or
+conditions. Bundled `brand/` assets follow current custom-integration packaging;
+Core's separate brands-repository requirement is not claimed. Actions, installation,
+removal, supported endpoints and safety boundaries are documented above.
 
 ## Design and credits
 

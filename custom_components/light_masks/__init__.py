@@ -1,7 +1,7 @@
 """Light Masks integration lifecycle."""
 
-import asyncio
 from collections.abc import Mapping
+from contextvars import ContextVar
 from typing import Any
 
 import voluptuous as vol
@@ -15,6 +15,7 @@ from homeassistant.exceptions import (
 )
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.service import async_register_admin_service
 
 from .const import DOMAIN, PLATFORMS
@@ -24,7 +25,7 @@ from .model import Color, Intent, Mask
 
 type LightMasksEntry = ConfigEntry[Controller]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-RELOAD_LOCKS = f"{DOMAIN}_configuration_locks"
+_RELOAD_CONTEXT: ContextVar[Controller | None] = ContextVar("light_masks_reload", default=None)
 
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
@@ -168,20 +169,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: LightMasksEntry) -> bool
     controller = Controller(
         hass, entry, output, initial, masks, attributes, outputs=outputs, aggregate=aggregate
     )
-    previous: Controller | None = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    previous = _RELOAD_CONTEXT.get()
+    _RELOAD_CONTEXT.set(None)
+    if previous is not None and previous.entry.entry_id != entry.entry_id:
+        previous = None
     preserve_activation = previous is not None
     if previous is not None:
         if previous.outputs == controller.outputs and previous.aggregate == controller.aggregate:
-            controller.authorizations = dict(previous.authorizations)
             controller._safety_block = previous._safety_block
             controller.error = previous.error
-        else:
-            controller.authorized_on = False
+        controller.reload_lock = previous.reload_lock
     try:
         await controller.initialize(preserve_activation=preserve_activation)
     except (ValueError, KeyError, TypeError, OSError, HomeAssistantError) as err:
         raise ConfigEntryError(f"Light Masks intent storage could not be loaded: {err}") from err
     entry.runtime_data = controller
+    for registered in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if registered.domain == "button" and registered.unique_id == f"{entry.entry_id}_resume":
+            registry.async_remove(registered.entity_id)
+    ir.async_delete_issue(hass, DOMAIN, f"{entry.entry_id}_external_change")
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(async_reload))
     controller.start()
@@ -189,17 +195,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: LightMasksEntry) -> bool
 
 
 async def async_reload(hass: HomeAssistant, entry: LightMasksEntry) -> None:
-    locks = hass.data.setdefault(RELOAD_LOCKS, {})
-    async with locks.setdefault(entry.entry_id, asyncio.Lock()):
-        # Core clears runtime_data on unload. Hand off config-edit context only.
-        handoffs = hass.data.setdefault(DOMAIN, {})
+    async with entry.runtime_data.reload_lock:
         previous: Controller | None = getattr(entry, "runtime_data", None)
-        if previous is not None:
-            handoffs[entry.entry_id] = previous
+        token = _RELOAD_CONTEXT.set(previous)
         try:
             await hass.config_entries.async_reload(entry.entry_id)
         finally:
-            handoffs.pop(entry.entry_id, None)
+            _RELOAD_CONTEXT.reset(token)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: LightMasksEntry) -> bool:
@@ -215,4 +217,3 @@ async def async_remove_entry(hass: HomeAssistant, entry: LightMasksEntry) -> Non
     from .const import STORE_VERSION
 
     await Store(hass, STORE_VERSION, f"{DOMAIN}.{entry.entry_id}").async_remove()
-    hass.data.get(RELOAD_LOCKS, {}).pop(entry.entry_id, None)

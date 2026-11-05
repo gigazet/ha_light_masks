@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from datetime import datetime, timedelta
@@ -38,6 +39,8 @@ ACK_TIMEOUT = 3.0
 MULTI_ZONE_ACK_TIMEOUT = 5.0
 SETTLE_SECONDS = 0.75
 MAX_ATTEMPTS = 3
+MAX_RECONCILIATIONS = 3
+RECONCILIATION_WINDOW = 60.0
 
 
 class Controller:
@@ -85,12 +88,7 @@ class Controller:
             if self.engine.multi_zone
             else tuple(dict.fromkeys(state.entity_id for state in endpoint_tree(hass, output)))
         )
-        self.authorizations = {
-            zone: (root := hass.states.get(self.outputs[zone])) is not None
-            and root.state in ("on", "off")
-            and all(hass.states.is_state(member, "on") for member in members)
-            for zone, members in self.zone_members.items()
-        }
+        self.reload_lock = asyncio.Lock()
         self.zone_status = {zone: "shadow" for zone in self.outputs}
         self.zone_errors: dict[str, str | None] = {zone: None for zone in self.outputs}
         self.zone_attempts = {zone: 0 for zone in self.outputs}
@@ -111,14 +109,7 @@ class Controller:
         self._safety_block = False
         self._availability: tuple[frozenset[str], bool] | None = None
         self._delivery_failures: dict[str, str] = {}
-
-    @property
-    def authorized_on(self) -> bool:
-        return all(self.authorizations.values())
-
-    @authorized_on.setter
-    def authorized_on(self, value: bool) -> None:
-        self.authorizations = dict.fromkeys(self.outputs, value)
+        self._reconciliations: deque[float] = deque()
 
     async def initialize(self, *, preserve_activation: bool = False) -> None:
         raw = await self.store.async_load()
@@ -152,8 +143,7 @@ class Controller:
         self._worker = self.hass.async_create_background_task(
             self._run(), f"Light Masks writer {self.entry.entry_id}"
         )
-        if self.engine.multi_zone:
-            self._availability_changed()
+        self._availability_changed()
         self.refresh()
 
     async def stop(self) -> None:
@@ -242,8 +232,6 @@ class Controller:
             return None
         if self.observed(self.outputs[zone]) is None:
             return "unavailable"
-        if self.desired_zones()[zone].on and not self.authorizations[zone]:
-            return "awaiting_resume"
         return self._delivery_failures.get(zone)
 
     def aggregate_available(self) -> bool:
@@ -256,7 +244,7 @@ class Controller:
         for zone in self.outputs:
             if blocked := self.zone_blocked(zone):
                 self.zone_status[zone] = blocked
-        if not self.engine.apply or self.engine.suspended:
+        if not self.engine.apply:
             return
         if "unavailable" in self.zone_status.values() or not self.aggregate_available():
             self.status = "degraded"
@@ -264,8 +252,6 @@ class Controller:
             self.status = "failed"
         elif "unverified" in self.zone_status.values():
             self.status = "unverified"
-        elif "awaiting_resume" in self.zone_status.values():
-            self.status = "awaiting_resume"
 
     @callback
     def _availability_changed(self) -> bool:
@@ -273,7 +259,19 @@ class Controller:
             frozenset(zone for zone in self.outputs if self.observed(self.outputs[zone]) is None),
             self.aggregate_available(),
         )
-        changed = self._availability is not None and availability != self._availability
+        previous = self._availability
+        changed = previous is not None and availability != previous
+        if previous is not None:
+            for zone in availability[0] - previous[0]:
+                _LOGGER.warning("Light Masks output %s is unavailable", self.outputs[zone])
+            recovered = previous[0] - availability[0]
+            for zone in recovered:
+                _LOGGER.info("Light Masks output %s is available again", self.outputs[zone])
+                self._delivery_failures.pop(zone, None)
+                self.zone_errors[zone] = None
+            if recovered:
+                self._failure_latched = False
+                self._reconciliations.clear()
         self._availability = availability
         self._update_health()
         return changed
@@ -322,6 +320,7 @@ class Controller:
                 if not availability_only:
                     self._failure_latched = False
                     self._delivery_failures.clear()
+                    self._reconciliations.clear()
                 self._wake.set()
         self.publish()
 
@@ -340,7 +339,6 @@ class Controller:
             raise ServiceValidationError("Transition must be between 0 and 300 seconds")
         if not power_only and data.get("effect") is not None:
             raise ServiceValidationError("Native effects are not supported by Light Masks")
-        previously_authorized = dict(self.authorizations)
         before_zones = self.desired_zones()
         try:
             before, after = await self.engine.update(
@@ -353,17 +351,6 @@ class Controller:
             self.status = "failed"
             self.fault("storage", str(err))
             raise HomeAssistantError("Light Masks could not persist the command") from err
-        if self.engine.is_normal(producer):
-            for zone in self.outputs if producer == "normal" else (producer,):
-                if self.engine.normals[zone].on:
-                    self.authorizations[zone] = True
-        if (
-            operation in ("on", "toggle")
-            and not self.engine.is_normal(producer)
-            and self.engine.intents[producer].on
-            and any(m.id == producer and m.power == "force_on" for m in self.engine.masks)
-        ):
-            self.authorized_on = True
         if normalize(before, self.attributes) != normalize(after, self.attributes):
             self._transition = float(transition)
             self._context = context
@@ -371,7 +358,7 @@ class Controller:
             if value != before_zones[zone]:
                 self.transitions[zone] = float(transition)
                 self._context = context
-        self.refresh(force=self.authorizations != previously_authorized)
+        self.refresh(force=self._failure_latched or bool(self._delivery_failures))
 
     async def set_apply(self, enabled: bool) -> None:
         try:
@@ -383,9 +370,10 @@ class Controller:
         self.refresh(force=True)
 
     async def resume(self) -> None:
+        """Compatibility action for retrying after a corrected storage or endpoint fault."""
         try:
             self.validate()
-            await self.engine.set_mode(suspended=False)
+            await self.engine.set_mode()
         except ValueError as err:
             raise ServiceValidationError(f"Cannot resume this output: {err}") from err
         except (OSError, HomeAssistantError) as err:
@@ -393,14 +381,13 @@ class Controller:
             self.fault("storage", str(err))
             raise HomeAssistantError("Could not persist Resume") from err
         self._safety_block = False
-        self.authorized_on = True
         self.error = None
         for reason in ("external_change", "delivery", "storage", "endpoint"):
             ir.async_delete_issue(self.hass, DOMAIN, f"{self.entry.entry_id}_{reason}")
         self.refresh(force=True)
 
     async def sync(self) -> None:
-        """Retry without granting startup power authorization or clearing suspension."""
+        """Retry delivery without clearing storage or unsafe-topology faults."""
         self.refresh(force=True)
 
     async def _tick(self, now: datetime) -> None:
@@ -421,20 +408,22 @@ class Controller:
         old, new = event.data.get("old_state"), event.data.get("new_state")
         if not self.engine.multi_zone and (new is None or new.state not in ("on", "off")):
             self.status = "unavailable"
-            self.publish()
+            self._availability_changed()
+            self.refresh(force=True, availability_only=True)
             return
         try:
             self.validate()
         except ValueError as err:
             if not self.engine.multi_zone and str(err) == "unavailable_output":
                 self.status = "unavailable"
-                self.publish()
+                self._availability_changed()
+                self.refresh(force=True, availability_only=True)
                 return
             self._safety_block = True
             self.status = "failed"
             self.fault("endpoint", str(err))
             return
-        if self.engine.multi_zone and self._availability_changed():
+        if self._availability_changed():
             self.refresh(force=True, availability_only=True)
             return
         if self.engine.multi_zone and (new is None or new.state not in ("on", "off")):
@@ -462,38 +451,37 @@ class Controller:
         if observed is None and not self.engine.multi_zone:
             return
         if self.converged(self.desired()):
-            if self.engine.apply and not self.engine.suspended and not self._safety_block:
+            if self.engine.apply and not self._safety_block:
                 self._confirm()
             return
-        if not self.engine.apply or self.engine.suspended or self._safety_block:
+        if (
+            not self.engine.apply
+            or self._safety_block
+            or (self._failure_latched and not self.engine.multi_zone)
+        ):
             return
-        revision = self.engine.revision
-        try:
-            if self.engine.multi_zone or self.members != (self.output,):
-                # An aggregate/average is not a safe baseline for divergent members.
-                await self.engine.set_mode(suspended=True)
-                result = "suspended"
-            else:
-                assert observed is not None
-                result = await self.engine.reconcile(observed, time.time(), revision)
-            if result == "suspended":
-                self.status = "suspended_external_change"
-                self.fault("external_change", "External output change; explicit Resume required")
-            elif result == "adopted":
-                assert observed is not None
-                if observed.on:
-                    self.authorized_on = True
-                self.refresh()
-        except (OSError, HomeAssistantError) as err:
-            self._safety_block = True
+        now = self.hass.loop.time()
+        while self._reconciliations and self._reconciliations[0] <= now - RECONCILIATION_WINDOW:
+            self._reconciliations.popleft()
+        if len(self._reconciliations) >= MAX_RECONCILIATIONS:
+            error = "Repeated external changes; check for competing light controls"
+            for zone, intent in self.desired_zones().items():
+                if not self.zone_blocked(zone) and not self.zone_converged(zone, intent):
+                    self._delivery_failures[zone] = "failed"
+                    self.zone_status[zone] = "failed"
+                    self.zone_errors[zone] = error
+            self._failure_latched = True
             self.status = "failed"
-            self.fault("storage", str(err))
+            self.fault("delivery", error)
+            return
+        self._reconciliations.append(now)
+        self._transition, self._context = 0.0, None
+        self.transitions = dict.fromkeys(self.outputs, 0.0)
+        self.refresh(force=True, availability_only=True)
 
     def _blocked(self, desired: Intent) -> str | None:
         if not self.engine.apply:
             return "shadow"
-        if self.engine.suspended:
-            return "suspended_external_change"
         observed = self.observed() if not self.engine.multi_zone else None
         if self._safety_block:
             return "failed"
@@ -501,11 +489,6 @@ class Controller:
             return None
         if observed is None:
             return "unavailable"
-        if any(
-            intent.on and not self.authorizations[zone]
-            for zone, intent in self.desired_zones().items()
-        ):
-            return "awaiting_resume"
         return None
 
     def validate(self) -> None:
@@ -579,7 +562,7 @@ class Controller:
                 await self._deliver(desired, generation)
             finally:
                 self._busy = False
-                if self.engine.multi_zone and not self._stopped:
+                if not self._stopped:
                     if self._settle:
                         self._settle.cancel()
                     self._settle = self.hass.loop.call_later(SETTLE_SECONDS, self._schedule_settled)
@@ -745,7 +728,6 @@ class Controller:
             "revision": self.engine.revision,
             "last_sent_revision": self.last_sent_revision,
             "attempts": self.attempts,
-            "authorized_on": self.authorized_on,
             "state": self.engine.snapshot(),
             "masks": [asdict(mask) for mask in self.engine.masks],
             "resolution": asdict(resolution),
@@ -772,7 +754,6 @@ class Controller:
                         "status": self.delivery_status(zone),
                         "error": self.zone_errors[zone],
                         "attempts": self.zone_attempts[zone],
-                        "authorized_on": self.authorizations[zone],
                     }
                     for zone, output in self.outputs.items()
                 },
@@ -786,7 +767,6 @@ class Controller:
             "failed",
             "unverified",
             "degraded",
-            "awaiting_resume",
         ):
             return self.status
         return self.zone_status[zone]

@@ -121,15 +121,14 @@ def test_resolution_32_masks_p95():
     assert sorted(samples)[949] < 0.005
 
 
-async def test_external_observation_cannot_overwrite_concurrent_intent():
+async def test_legacy_suspension_is_migrated_without_changing_intent():
     engine = Engine(Intent(True, 128, BLUE), (Mask("wash", 100),), AsyncMock())
-    revision = engine.revision
     await engine.update("wash", "on", {"xy_color": (0.3, 0.6)}, 0)
-    assert await engine.reconcile(Intent(False), 0, revision) == "superseded"
+    raw = {**engine.snapshot(), "suspended": True}
+    engine.restore(raw, 0, preserve_activation=True)
     assert engine.normal == Intent(True, 128, BLUE)
-    assert await engine.reconcile(Intent(False), 0, engine.revision) == "suspended"
-    assert engine.suspended
-    assert engine.normal.on
+    assert engine.intents["wash"].on
+    assert "suspended" not in engine.snapshot()
 
 
 def test_hs_wrap_and_achromatic_feedback():
@@ -211,19 +210,17 @@ async def test_multi_zone_restart_and_config_edit_restore_policy():
     engine = Engine(normals, masks, AsyncMock())
     for mask in masks:
         await engine.update(mask.id, "on", {}, 100)
-    await engine.set_mode(apply=True, suspended=True)
+    await engine.set_mode(apply=True)
     restored = Engine(normals, masks, AsyncMock())
     restored.restore(engine.snapshot(), 110)
     assert not restored.intents["temporary"].on
     assert restored.intents["restored"].expires_at == 160
-    assert restored.apply and restored.suspended
+    assert restored.apply
     restored.restore(engine.snapshot(), 120, preserve_activation=True)
     assert restored.intents["temporary"].on
     restored.restore(engine.snapshot(), 170, preserve_activation=True)
     assert not any(i.on for i in restored.intents.values())
     assert restored.normals == normals
-    with pytest.raises(ValueError, match="telemetry"):
-        await restored.reconcile(Intent(False), 170, restored.revision)
     assert restored.normals == normals
 
 

@@ -13,17 +13,26 @@
           "fallback_brightness": "Initial fallback brightness (1-255)",
           "fallback_kelvin": "Initial fallback color temperature (K)"
         },
-        "data_description": {"multi_zone": "Optional: configure at least two disjoint native groups with shared masks. Leave Base empty; Power alias is ignored in this mode. The following steps collect zones and an optional whole-room group. Ordinary controls must target the generated Main lights."}
+        "data_description": {
+          "name": "Optional display name for this virtual compositor; does not change entity IDs.",
+          "multi_zone": "Configure at least two disjoint native groups with shared masks. Leave Base empty; Power alias is ignored.",
+          "output": "Existing light or compatible group to control. Its identity is fixed after setup.",
+          "power_port": "Create an on/off-only alias for Main control, not a separate mask.",
+          "fallback_brightness": "Initial brightness used only when the base has no reported brightness.",
+          "fallback_kelvin": "Initial color temperature used only when the base has no reported color."
+        }
       },
       "zone": {
         "title": "Add a native zone",
         "description": "{count} zones added. Each zone needs a disjoint Zigbee2MQTT group on the same bridge with identical capabilities. All members of each zone must have the same known power state during enrollment. Zone topology is fixed after setup.",
-        "data": {"name": "Zone name", "output": "Native zone group", "add_another": "Add another zone"}
+        "data": {"name": "Zone name", "output": "Native zone group", "add_another": "Add another zone"},
+        "data_description": {"name": "Display name of this zone's Main control device.", "output": "Available native Zigbee2MQTT group with members not used by another zone.", "add_another": "Continue adding zones; at least two zones are required."}
       },
       "aggregate": {
         "title": "Review zones and optional aggregate",
         "description": "Zones: {zones}. The optional native aggregate must contain exactly the union of these zones. It is used only when all zones are available and need identical commands; otherwise native zone groups are used. Whole Main is On if any ordinary zone is On; its toggle then requests all Off. Mixed color and brightness are not averaged. Masks apply to every zone. Unknown/unavailable members block only their zone; healthy zones continue with overall degraded status. Unsafe topology still blocks the compositor. Setup starts with Apply Off.",
-        "data": {"aggregate": "Optional whole-room native group", "confirm": "I will route ordinary controls through zone/whole Main lights, not physical outputs"}
+        "data": {"aggregate": "Optional whole-room native group", "confirm": "I will route ordinary controls through zone/whole Main lights, not physical outputs"},
+        "data_description": {"aggregate": "Optional native group containing exactly the union of all zone members.", "confirm": "Required acknowledgment: external physical writes will be corrected to the calculated state when Apply is enabled."}
       }
     },
     "error": {
@@ -51,18 +60,21 @@
         "description": "{count} masks configured. Each mask is an independent light device. Configuration edits preserve active masks and their current deadlines.",
         "menu_options": {"base": "Name and main control", "add_mask": "Add mask", "edit_mask": "Edit mask", "remove_mask": "Remove mask", "rename_zone": "Rename zone"}
       },
-      "rename_zone": {"title": "Select zone to rename", "data": {"zone": "Zone"}},
-      "zone_name": {"title": "Rename zone", "description": "Only the display name changes. Entity IDs, membership and stored ordinary intent remain unchanged.", "data": {"name": "Zone name"}},
+      "rename_zone": {"title": "Select zone to rename", "data": {"zone": "Zone"}, "data_description": {"zone": "Existing zone whose display name you want to change."}},
+      "zone_name": {"title": "Rename zone", "description": "Only the display name changes. Entity IDs, membership and stored ordinary intent remain unchanged.", "data": {"name": "Zone name"}, "data_description": {"name": "New display name; entity IDs and stored intent are preserved."}},
       "base": {
         "title": "Name and main control",
         "description": "Fixed base: {output}. Name labels this setup and its devices; it does not change entity IDs or lighting behavior. Use Main control for ordinary lighting automations, not the base. Main control remembers everyday power, brightness and color; masks temporarily override selected channels. Main control Off requests darkness, while mask Off releases that mask. Power-controlling masks can override Main control's power. To use a different base, create a new Light Masks entry.",
-        "data": {"name": "Name"}
+        "data": {"name": "Name"},
+        "data_description": {"name": "Display name of this compositor; the physical output cannot be replaced here."}
       },
       "add_mask": {
         "title": "Add mask",
         "description": "Choose which parts of the base light this mask may override. Turning the mask On activates those contributions; turning it Off removes them and reveals Main control or other active masks. Device-page permission indicators show these settings, not which mask currently wins.",
         "data": {"name": "Name", "priority": "Priority (1-1000; higher number wins)", "power": "Control on/off", "brightness": "Control brightness", "appearance": "Control color", "restore": "Restore activation after restart or manual reload", "duration": "Maximum duration in seconds (0 disables expiry)"},
         "data_description": {
+          "name": "Display name of this independent mask device.",
+          "restore": "Restore activation after restart or manual reload if its lease has not expired. Values are always retained.",
           "power": "Unchecked: this mask cannot turn the base on or off; it only changes selected brightness/color when lighting is on. Checked: while active, it requests On at its priority, even if Main control is Off, unless a higher-priority power mask wins. Turning this mask Off releases its request; the base stays On if another request requires it. Apply and safety protections still apply.",
           "brightness": "Allow this mask's stored brightness to override lower-priority brightness. Unchecked: brightness remains local to this mask, even if Home Assistant's color-light card displays a brightness slider.",
           "appearance": "Allow this mask's stored RGB color or color temperature to override lower-priority color. Independent of Control brightness; only modes supported by the base are available.",
@@ -70,12 +82,14 @@
           "duration": "Automatically release the mask after this many seconds. Each turn_on action starts a fresh timer, including color/brightness updates while already On. 0 means no automatic release."
         }
       },
-      "edit_mask": {"title": "Select mask to edit", "data": {"mask": "Mask"}},
+      "edit_mask": {"title": "Select mask to edit", "data": {"mask": "Mask"}, "data_description": {"mask": "Existing mask whose permissions or lease settings you want to edit."}},
       "mask": {
         "title": "Edit mask",
         "description": "Saving keeps this mask's current On/Off state and stored values. Permission and priority changes take effect immediately. Device-page permission indicators update to match these settings.",
         "data": {"name": "Name", "priority": "Priority (1-1000; higher number wins)", "power": "Control on/off", "brightness": "Control brightness", "appearance": "Control color", "restore": "Restore activation after restart or manual reload", "duration": "Maximum duration in seconds (0 disables expiry)", "force_off": "Compatibility: request Off instead of On while active"},
         "data_description": {
+          "name": "Display name of this independent mask device.",
+          "restore": "Restore activation after restart or manual reload if its lease has not expired. Values are always retained.",
           "power": "Unchecked: this mask cannot turn the base on or off; it only changes selected brightness/color when lighting is on. Checked: while active, it requests On at its priority, even if Main control is Off, unless a higher-priority power mask wins. Turning this mask Off releases its request; the base stays On if another request requires it. The compatibility option below, when present and checked, requests Off instead. Apply and safety protections still apply.",
           "brightness": "Allow this mask's stored brightness to override lower-priority brightness. Unchecked: brightness remains local to this mask, even if Home Assistant's color-light card displays a brightness slider.",
           "appearance": "Allow this mask's stored RGB color or color temperature to override lower-priority color. Independent of Control brightness; only modes supported by the base are available.",
@@ -84,16 +98,16 @@
           "force_off": "Only shown for an older Off-requesting mask. With Control on/off checked, this makes an active mask request darkness at its priority. Turning the mask Off releases that request and may restore light. Uncheck this option to request On instead, or uncheck Control on/off to stop controlling power. Saving either change can immediately affect the base."
         }
       },
-      "remove_mask": {"title": "Select mask to remove", "data": {"mask": "Mask"}},
+      "remove_mask": {"title": "Select mask to remove", "data": {"mask": "Mask"}, "data_description": {"mask": "Mask device and stored intent to delete; references are not rewritten."}},
       "confirm_remove": {
         "title": "Remove {name}?",
         "description": "This removes the mask device and its saved state. Automations, scenes and dashboards referencing it are not rewritten. Removing an active mask reveals the lower-priority result and may change the physical light.",
-        "data": {"confirm": "Remove this mask and its saved state"}
+        "data": {"confirm": "Remove this mask and its saved state"},
+        "data_description": {"confirm": "Delete this mask. Removing an active mask may immediately change the physical light."}
       }
     },
     "error": {
       "unavailable_output": "Select an available base light.",
-      "base_fixed": "The base cannot be changed. Create a new Light Masks entry for a different output.",
       "duplicate_priority": "Another mask already uses this priority.",
       "empty_mask": "Select at least one controlled channel.",
       "unsupported_brightness": "The base light does not support brightness.",
@@ -122,6 +136,8 @@
             "duration": "Maximum duration in seconds (0 disables expiry)"
           },
           "data_description": {
+            "name": "Display name of this independent mask device.",
+            "restore": "Restore activation after restart or manual reload if its lease has not expired. Values are always retained.",
             "power": "Unchecked: this mask cannot turn the base on or off; it only changes selected brightness/color when lighting is on. Checked: while active, it requests On at its priority, even if Main control is Off, unless a higher-priority power mask wins. Turning this mask Off releases its request; the base stays On if another request requires it. Apply and safety protections still apply.",
             "brightness": "Allow this mask's stored brightness to override lower-priority brightness. Unchecked: brightness remains local to this mask, even if Home Assistant's color-light card displays a brightness slider.",
             "appearance": "Allow this mask's stored RGB color or color temperature to override lower-priority color. Independent of Control brightness; only modes supported by the base are available.",
@@ -143,6 +159,8 @@
             "duration": "Maximum duration in seconds (0 disables expiry)"
           },
           "data_description": {
+            "name": "Display name of this independent mask device.",
+            "restore": "Restore activation after restart or manual reload if its lease has not expired. Values are always retained.",
             "power": "Unchecked: this mask cannot turn the base on or off; it only changes selected brightness/color when lighting is on. Checked: while active, it requests On at its priority, even if Main control is Off, unless a higher-priority power mask wins. Turning this mask Off releases its request; the base stays On if another request requires it. The compatibility option below, when present and checked, requests Off instead. Apply and safety protections still apply.",
             "brightness": "Allow this mask's stored brightness to override lower-priority brightness. Unchecked: brightness remains local to this mask, even if Home Assistant's color-light card displays a brightness slider.",
             "appearance": "Allow this mask's stored RGB color or color temperature to override lower-priority color. Independent of Control brightness; only modes supported by the base are available.",
@@ -169,9 +187,6 @@
     "switch": {
       "apply": {"name": "Apply to output"}
     },
-    "button": {
-      "resume": {"name": "Resume (may turn light on)"}
-    },
     "sensor": {
       "control_power": {"name": "Control on/off", "state": {"disabled": "Disabled", "force_on": "Enabled: requests On", "force_off": "Enabled: requests Off"}},
       "control_brightness": {"name": "Control brightness", "state": {"disabled": "Disabled", "enabled": "Enabled"}},
@@ -180,34 +195,28 @@
         "name": "Delivery status",
         "state": {
           "shadow": "Shadow",
-          "awaiting_resume": "Awaiting power authorization",
           "in_sync": "In sync",
           "pending": "Pending",
           "unverified": "No confirming state report",
           "unavailable": "Output unavailable",
           "degraded": "Degraded: healthy zones continue",
-          "failed": "Failed",
-          "suspended_external_change": "Suspended after external change"
+          "failed": "Failed"
         }
       }
     }
   },
   "issues": {
-    "external_change": {
-      "title": "Light Masks paused after an external change",
-      "description": "The output {output} changed while masks were active, or a group member diverged from the requested state. Intent is preserved and output writes are paused. Stop competing physical/group writers, inspect Light Masks Explain, and press Resume when ready. Resume can turn the light on."
-    },
     "storage": {
       "title": "Light Masks could not save intent",
-      "description": "A storage operation for {output} failed. Output writes are blocked. Check disk space, permissions and the Home Assistant log. After fixing storage, press Resume or reload. A rejected command must be submitted again."
+      "description": "A storage operation for {output} failed. Output writes are blocked. Check disk space, permissions and the log. After fixing storage, reload or use the Retry after fixing a fault action. Resubmit rejected commands."
     },
     "delivery": {
       "title": "Light Masks output did not converge",
-      "description": "{output} did not reach the requested state after three attempts. Check connectivity, device capabilities and the log. No further attempts are made for this unchanged result until Sync, Resume or a new effective command."
+      "description": "{output} did not converge, or external controls repeatedly overrode it. Check connectivity and stop competing writers. Delivery attempts are bounded; Sync, a new command, or actual output recovery can retry. Unsafe topology and storage faults stay blocked."
     },
     "endpoint": {
       "title": "Light Masks output is no longer safe to control",
-      "description": "{output} has invalid feedback, unsupported capabilities, a conflicting owner, or changed group membership. Inspect the log and configuration before Resume. Reload after a capability change. For changed group membership, restore the original members or recreate the Light Masks entry."
+      "description": "{output} has invalid feedback, unsupported capabilities, conflicting ownership, or changed membership. Inspect the log and configuration before using Retry after fixing a fault. Restore the original topology or recreate the entry for a different output."
     }
   },
   "services": {
@@ -217,13 +226,13 @@
       "fields": {"config_entry_id": {"name": "Light Masks entry"}}
     },
     "resume": {
-      "name": "Resume",
-      "description": "Clear suspension and authorize the current intent, including On. Apply must also be enabled. User calls require administrator permission.",
+      "name": "Retry after fixing a fault",
+      "description": "Compatibility action: revalidate topology and storage, then retry. Normal external-change, reconnect and restart recovery is automatic. Apply must be enabled. Administrator permission is required.",
       "fields": {"config_entry_id": {"name": "Light Masks entry"}}
     },
     "sync": {
       "name": "Sync",
-      "description": "Retry the current result without clearing suspension or startup power protection. User calls require administrator permission.",
+      "description": "Retry the current calculated result without clearing storage or unsafe-topology faults. User calls require administrator permission.",
       "fields": {"config_entry_id": {"name": "Light Masks entry"}}
     },
     "clear_fields": {

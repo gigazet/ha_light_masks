@@ -106,7 +106,7 @@ async def test_z2m_aggregate_report_cannot_confirm_silent_leaf(hass, z2m_output,
 
 
 @pytest.mark.parametrize("z2m_output", [1, 2], indirect=True)
-async def test_z2m_external_leaf_change_suspends_and_resume_uses_group(
+async def test_z2m_external_leaf_change_automatically_reconciles_using_group(
     hass, z2m_output, z2m_integration
 ):
     controller = z2m_integration.runtime_data
@@ -118,17 +118,14 @@ async def test_z2m_external_leaf_change_suspends_and_resume_uses_group(
     member.async_write_ha_state()
     await asyncio.sleep(0.04)
     await hass.async_block_till_done()
-    assert controller.engine.suspended
     assert controller.engine.normal.on
-    assert len(z2m_output.group.calls) == 1
-    await controller.resume()
     await settle(hass, controller)
     assert controller.status == "in_sync"
     assert len(z2m_output.group.calls) == 2
     assert not member.calls
 
 
-async def test_z2m_startup_does_not_trust_aggregate_on(hass, z2m_output, z2m_integration):
+async def test_z2m_startup_restores_intent_not_aggregate_state(hass, z2m_output, z2m_integration):
     entry = z2m_integration
     group = z2m_output.group
     group._attr_is_on = True
@@ -147,11 +144,10 @@ async def test_z2m_startup_does_not_trust_aggregate_on(hass, z2m_output, z2m_int
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
     controller = entry.runtime_data
-    calls = len(group.calls)
     await settle(hass, controller)
-    assert controller.status == "awaiting_resume"
-    assert len(group.calls) == calls
-    assert not z2m_output.members[-1].is_on
+    assert controller.status == "in_sync"
+    assert all(member.is_on for member in z2m_output.members)
+    assert not any(member.calls for member in z2m_output.members)
 
 
 async def test_z2m_unavailable_member_defers_delivery(hass, z2m_output, z2m_integration):
@@ -427,7 +423,7 @@ async def test_blocked_delivery_coalesces_latest_off(hass, integration, output):
     assert controller.status == "in_sync"
 
 
-async def test_external_change_suspends_without_poisoning_normal(hass, integration, output):
+async def test_external_change_reconciles_without_poisoning_normal(hass, integration, output):
     ids = entities(hass, integration)
     controller = integration.runtime_data
     wash = list(integration.subentries)[1]
@@ -439,15 +435,12 @@ async def test_external_change_suspends_without_poisoning_normal(hass, integrati
     await call(hass, output.entity_id, "turn_off")
     await asyncio.sleep(0.04)
     await hass.async_block_till_done()
-    assert controller.engine.suspended
     assert controller.engine.normal == normal
-    assert not output.is_on
-    await controller.resume()
     await settle(hass, controller)
     assert output.is_on
 
 
-async def test_reload_never_wakes_off_output(hass, integration, output):
+async def test_reload_automatically_restores_calculated_on(hass, integration, output):
     ids = entities(hass, integration)
     controller = integration.runtime_data
     await call(hass, ids["normal"])
@@ -460,11 +453,8 @@ async def test_reload_never_wakes_off_output(hass, integration, output):
     await hass.config_entries.async_reload(integration.entry_id)
     controller = integration.runtime_data
     await settle(hass, controller)
-    assert not output.is_on
-    assert controller.status == "awaiting_resume"
-    await controller.resume()
-    await settle(hass, controller)
     assert output.is_on
+    assert controller.status == "in_sync"
 
 
 async def test_storage_failure_exposed(hass, integration, output):
@@ -476,7 +466,7 @@ async def test_storage_failure_exposed(hass, integration, output):
     assert not output.calls
 
 
-async def test_config_flow_rejects_group(hass, integration, output):
+async def test_config_flow_rejects_group(hass, integration, output, replacement_output):
     from homeassistant import data_entry_flow
 
     hass.states.async_set(
@@ -500,6 +490,15 @@ async def test_config_flow_rejects_group(hass, integration, output):
     )
     assert result["type"] == data_entry_flow.FlowResultType.FORM
     assert result["errors"] == {"base": "aggregate_output"}
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"output": replacement_output.entity_id}
+    )
+    assert result["type"] == "create_entry"
+    assert (
+        result["result"].unique_id == er.async_get(hass).async_get(replacement_output.entity_id).id
+    )
+    await hass.async_block_till_done()
+    await hass.config_entries.async_unload(result["result"].entry_id)
 
 
 async def test_core_toggle_normalizes_rgb_and_relative_brightness_is_local(hass, integration):
@@ -569,17 +568,18 @@ async def test_atomic_file_failure_is_not_swallowed_by_core_store(
     assert not output.calls
 
 
-async def test_unchanged_explicit_on_authorizes_after_restart(hass, integration, output):
+async def test_restart_automatically_applies_persisted_on(hass, integration, output):
     controller = integration.runtime_data
     await call(hass, entities(hass, integration)["normal"])
     await controller.engine.set_mode(apply=True)
     await hass.config_entries.async_reload(integration.entry_id)
     controller = integration.runtime_data
     await settle(hass, controller)
-    assert controller.status == "awaiting_resume"
+    assert controller.status == "in_sync"
+    calls = list(output.calls)
     await controller.sync()
     await settle(hass, controller)
-    assert not output.calls
+    assert output.calls == calls
     await call(hass, entities(hass, integration)["normal"])
     await settle(hass, controller)
     assert output.is_on
@@ -656,8 +656,6 @@ async def test_effect_metadata_allows_static_masks_and_resume(hass, integration,
     await call(hass, output.entity_id, "turn_off")
     await asyncio.sleep(0.04)
     await hass.async_block_till_done()
-    assert controller.engine.suspended
-    await controller.resume()
     await settle(hass, controller)
     assert output.is_on
     assert controller.status == "in_sync"
@@ -904,18 +902,18 @@ async def test_repeated_reload_has_one_writer_and_one_set_of_entities(hass, inte
         assert not integration.runtime_data._worker.done()
 
 
-async def test_inactive_external_state_updates_normal_baseline(hass, integration, output):
+async def test_inactive_external_state_cannot_replace_normal_baseline(hass, integration, output):
     controller = integration.runtime_data
     await controller.set_apply(True)
     await settle(hass, controller)
     await call(hass, output.entity_id, brightness=90, color_temp_kelvin=3100)
     await asyncio.sleep(0.04)
     await settle(hass, controller)
-    assert controller.engine.normal.on
-    assert controller.engine.normal.brightness == 90
-    assert controller.engine.normal.color.value == 3100
-    assert len(output.calls) == 1
-    assert not controller.engine.suspended
+    assert not controller.engine.normal.on
+    assert controller.engine.normal.brightness == 128
+    assert controller.engine.normal.color.value == 4000
+    assert not output.is_on
+    assert len(output.calls) == 2
     assert controller.status == "in_sync"
 
 
@@ -1106,7 +1104,6 @@ async def test_options_edit_preserves_activation_deadline_and_identity(hass, int
     controller = integration.runtime_data
     await settle(hass, controller)
     assert controller.engine.intents == before
-    assert controller.authorized_on
     assert entities(hass, integration) == ids
     assert output.color_temp_kelvin == 3500
     assert output.brightness == 88
@@ -1116,7 +1113,7 @@ async def test_options_edit_preserves_activation_deadline_and_identity(hass, int
     assert hass.states.get(permission_id).state == "enabled"
     device = er.async_get(hass).async_get(ids[wash]).device_id
     assert dr.async_get(hass).async_get(device).name == "Test masks Renamed notification"
-    assert hass.data["light_masks"] == {}
+    assert "light_masks" not in hass.data
     assert await hass.config_entries.async_reload(integration.entry_id)
     await hass.async_block_till_done()
     assert not integration.runtime_data.engine.intents[wash].on
@@ -1208,7 +1205,6 @@ async def test_options_rename_preserves_base_intents_and_identity(
     assert controller.engine.snapshot() == before
     assert (await controller.store.async_load())["apply"]
     assert entities(hass, integration) == ids
-    assert controller.authorized_on
     assert replacement_output.calls == []
     assert output.calls == old_calls
     assert integration.title == "Renamed integration"
@@ -1301,6 +1297,14 @@ async def test_options_mask_validation_and_preserved_error_input(hass, integrati
         result["flow_id"], {**data, "priority": 200, "appearance": False, "brightness": True}
     )
     assert result["errors"] == {"brightness": "unsupported_brightness"}
+    output._attr_supported_color_modes = {ColorMode.COLOR_TEMP, ColorMode.XY}
+    output._attr_color_mode = ColorMode.COLOR_TEMP
+    output.async_write_ha_state()
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {**data, "priority": 200}
+    )
+    assert result["type"] == "create_entry"
+    await hass.async_block_till_done()
 
 
 async def test_new_entry_defaults_and_empty_options_menu(hass, output):
@@ -1348,7 +1352,7 @@ async def test_overlapping_config_reloads_preserve_state_and_stop_old_workers(ha
     assert first._worker.done()
     assert not integration.runtime_data._worker.done()
     assert integration.runtime_data.engine.snapshot() == before
-    assert hass.data["light_masks"] == {}
+    assert "light_masks" not in hass.data
 
 
 async def test_failed_config_reload_cleans_handoff_before_manual_retry(hass, integration, output):
@@ -1360,7 +1364,7 @@ async def test_failed_config_reload_cleans_handoff_before_manual_retry(hass, int
     hass.states.async_set(output.entity_id, "unavailable")
     await async_reload(hass, integration)
     assert not hasattr(integration, "runtime_data")
-    assert hass.data["light_masks"] == {}
+    assert "light_masks" not in hass.data
     assert first._worker.done()
     output.async_write_ha_state()
     await hass.config_entries.async_reload(integration.entry_id)
@@ -1368,21 +1372,19 @@ async def test_failed_config_reload_cleans_handoff_before_manual_retry(hass, int
     assert not integration.runtime_data.engine.intents[wash].on
 
 
-async def test_config_reload_preserves_safety_and_power_barriers(hass, integration, output):
+async def test_config_reload_preserves_safety_barrier(hass, integration, output):
     from custom_components.light_masks import async_reload
 
     controller = integration.runtime_data
     wash = list(integration.subentries)[1]
     await controller.set_apply(True)
     await call(hass, entities(hass, integration)[wash], rgb_color=[0, 255, 0])
-    assert not controller.authorized_on
     controller._safety_block = True
     controller.error = "Existing safety barrier"
     await async_reload(hass, integration)
     await settle(hass, integration.runtime_data)
     controller = integration.runtime_data
     assert controller.engine.intents[wash].on
-    assert not controller.authorized_on
     assert controller._safety_block
     assert controller.error == "Existing safety barrier"
     assert output.calls == []
@@ -1468,7 +1470,7 @@ async def test_group_confirmation_requires_every_member(
     assert 1 <= len(replacement_output.calls) <= 3
 
 
-async def test_group_external_member_change_suspends_without_masks(
+async def test_group_external_member_change_reconciles_without_masks(
     hass, group_integration, output, replacement_output
 ):
     controller = group_integration.runtime_data
@@ -1478,13 +1480,13 @@ async def test_group_external_member_change_suspends_without_masks(
     await call(hass, replacement_output.entity_id, "turn_off")
     await asyncio.sleep(0.04)
     await hass.async_block_till_done()
-    assert controller.engine.suspended
-    assert controller.status == "suspended_external_change"
+    await settle(hass, controller)
+    assert controller.status == "in_sync"
     assert controller.engine.normal.on
-    assert not replacement_output.is_on
+    assert replacement_output.is_on
 
 
-async def test_group_mixed_startup_does_not_wake_off_members(
+async def test_group_apply_on_restores_calculated_state_to_every_member(
     hass, group_output, output, replacement_output
 ):
     await call(hass, output.entity_id, brightness=128)
@@ -1497,11 +1499,10 @@ async def test_group_mixed_startup_does_not_wake_off_members(
     await hass.async_block_till_done()
     controller = entry.runtime_data
     assert controller.engine.normal.on
-    assert not controller.authorized_on
     await controller.set_apply(True)
     await settle(hass, controller)
-    assert controller.status == "awaiting_resume"
-    assert not replacement_output.calls
+    assert controller.status == "in_sync"
+    assert replacement_output.is_on
     await hass.config_entries.async_unload(entry.entry_id)
 
 
@@ -1695,6 +1696,16 @@ async def test_group_ownership_rechecked_after_flow_await(hass, group_output, ou
     )
     assert result["errors"] == {"base": "already_configured"}
     assert len(hass.config_entries.async_entries("light_masks")) == 1
+    monkeypatch.setattr(LightMasksConfigFlow, "async_set_unique_id", original)
+    owner = hass.config_entries.async_entries("light_masks")[0]
+    assert await hass.config_entries.async_remove(owner.entry_id)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"output": group_output[1]}
+    )
+    assert result["type"] == "create_entry"
+    assert result["result"].unique_id == er.async_get(hass).async_get(group_output[1]).id
+    await hass.async_block_till_done()
+    await hass.config_entries.async_unload(result["result"].entry_id)
 
 
 async def test_nested_group_delivery(hass, group_output, output, replacement_output):
