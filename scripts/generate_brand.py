@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 ROOT = Path(__file__).resolve().parents[1]
 DESTINATION = ROOT / "custom_components" / "light_masks" / "brand"
@@ -196,15 +196,23 @@ def main() -> None:
         mark.image.resize((240 * SCALE, 240 * SCALE), Image.Resampling.LANCZOS),
         (8 * SCALE, 8 * SCALE),
     )
-    for name, size in (("icon.png", 256), ("icon@2x.png", 512)):
-        padded.resize((size, size), Image.Resampling.LANCZOS).save(DESTINATION / name)
+    # Keep the dark ink inside the mark; outline only its silhouette on dark surfaces.
+    outline = Image.new("RGBA", padded.size, "#DFE7F5")
+    outline.putalpha(padded.getchannel("A").filter(ImageFilter.MaxFilter(4 * SCALE + 1)))
+    dark = Image.alpha_composite(outline, padded)
+    for prefix, image in (("", padded), ("dark_", dark)):
+        for name, size in (("icon.png", 256), ("icon@2x.png", 512)):
+            image.resize((size, size), Image.Resampling.LANCZOS).save(
+                DESTINATION / f"{prefix}{name}", optimize=True
+            )
     preview_dir = ROOT / "dist"
     preview_dir.mkdir(exist_ok=True)
     panels = []
     for theme in ("light", "dark"):
+        prefix = "dark_" if theme == "dark" else ""
         samples = "".join(
             f'<div><img width="{size}" height="{size}" src="'
-            f'../custom_components/light_masks/brand/icon@2x.png" alt="Light Masks">'
+            f'../custom_components/light_masks/brand/{prefix}icon@2x.png" alt="Light Masks">'
             f"<small>{size} px</small></div>"
             for size in (256, 64, 32)
         )
@@ -235,7 +243,7 @@ Coral, violet and mint masks float above a warm golden bulb.</p></header>"""
         "512 px PNG</a></footer></main></html>\n",
         encoding="utf-8",
     )
-    print(f"Generated SVG and 256/512 px transparent icons in {DESTINATION}")
+    print(f"Generated SVG and light/dark 256/512 px transparent icons in {DESTINATION}")
     print(f"Preview: {preview_dir / 'brand-preview.html'}")
 
 

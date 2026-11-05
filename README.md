@@ -510,11 +510,32 @@ The original mark uses three mask-bearing layers above a warm bulb: coral,
 violet and mint represent independent light intents. The transparent icon is
 provided at 256 px (`brand/icon.png`) and 512 px (`brand/icon@2x.png`), with an
 editable `brand/icon.svg` vector version, all under `custom_components/light_masks`.
+Dark-theme variants (`brand/dark_icon.png` and `brand/dark_icon@2x.png`) add a
+subtle pale silhouette outline so the dark edges remain visible on dark cards.
 After installing the development dependencies, run `python scripts/generate_brand.py`
 to regenerate the artwork and `dist/brand-preview.html` (light/dark backgrounds,
 including compact sizes). Geometry and palette live in that generator; edit it
 to keep vector and raster exports consistent. Pillow is a development-only
 dependency, not an integration runtime requirement.
+
+**Home Assistant and HACS use different image paths.** Home Assistant 2026.3+
+supports [integration-local brand images](https://developers.home-assistant.io/docs/core/integration/brand_images/).
+The icons ship inside the integration directory in both repository installs and
+the manual ZIP. Copy the complete directory, including `brand`, restart HA after
+installation, and refresh the browser. No extra integration, manifest icon field,
+or public image upload is needed for HA's local integration cards.
+
+These files also meet the [HACS brand-asset requirement](https://www.hacs.xyz/docs/publish/integration/).
+However, the HACS frontend release
+[`20250128065759`](https://github.com/hacs/frontend/blob/20250128065759/src/dashboards/hacs-dashboard.ts)
+still requests `https://brands.home-assistant.io/_/light_masks/icon.png`
+(or `dark_icon.png`) rather than HA's local brand API. On that renderer, bundled
+artwork alone **does not replace the HACS placeholder**. HACS must support local
+brand images, or its requested CDN image must exist; changing `hacs.json` cannot
+redirect this lookup. The separate [Marketplace image endpoint](https://github.com/home-assistant/brands#marketplace-icons)
+is not the endpoint that renderer uses. This repository does not publish CDN
+images or patch HACS. Check the installed HACS version before diagnosing a
+remaining placeholder as an installation problem.
 
 ## Configure and upgrade
 
