@@ -71,6 +71,9 @@ async def multi_entry(hass, native_zones, monkeypatch, request):
     )
     assert result["type"] == "create_entry", result
     entry = result["result"]
+    assert entry.unique_id == "multi_zone:" + ",".join(
+        sorted(er.async_get(hass).async_get(group.entity_id).id for group in native_zones.groups)
+    )
     await hass.async_block_till_done()
     assert hasattr(entry, "runtime_data"), entry
     yield entry
@@ -207,7 +210,6 @@ async def test_multi_partial_ack_retries_only_failed_zone(hass, native_zones, mu
     assert [len(g.calls) for g in native_zones.groups[:2]] == [0, 0]
     assert 1 <= len(native_zones.groups[-1].calls) <= 2
     assert list(c.zone_status.values())[:2] == ["in_sync", "in_sync"]
-    assert not c.engine.suspended
     assert all(not m.calls for m in native_zones.members)
 
 
@@ -237,7 +239,7 @@ async def test_multi_same_state_alarm_off_intent_survives_reload(hass, native_zo
     assert native_zones.members[2].is_on
 
 
-async def test_multi_startup_authorization_is_per_zone(hass, native_zones, multi_entry):
+async def test_multi_startup_reconciles_only_divergent_zone(hass, native_zones, multi_entry):
     c = multi_entry.runtime_data
     ids = entities(hass, multi_entry)
     await call(hass, ids["normal"])
@@ -252,16 +254,13 @@ async def test_multi_startup_authorization_is_per_zone(hass, native_zones, multi
     await hass.async_block_till_done()
     c = multi_entry.runtime_data
     await settle(hass, c)
-    assert list(c.authorizations.values()) == [True, True, False]
-    assert c.status == "awaiting_resume"
+    assert c.status == "in_sync"
     assert len(native_zones.aggregate.calls) == 1
+    assert len(native_zones.groups[-1].calls) == 1
     await c.sync()
     await settle(hass, c)
     assert len(native_zones.aggregate.calls) == 1
     await call(hass, ids[list(c.outputs)[0]])
-    await settle(hass, c)
-    assert not list(c.authorizations.values())[-1]
-    await c.resume()
     await settle(hass, c)
     assert len(native_zones.groups[-1].calls) == 1
     assert c.status == "in_sync"
@@ -358,7 +357,7 @@ async def test_multi_recovery_under_alarm_then_release_uses_latest_off(
     assert all(not m.calls for m in native_zones.members)
 
 
-async def test_multi_restart_unknown_zone_does_not_gain_authorization_on_reconnect(
+async def test_multi_restart_unknown_zone_automatically_restores_on_reconnect(
     hass, native_zones, multi_entry
 ):
     c = multi_entry.runtime_data
@@ -370,30 +369,32 @@ async def test_multi_restart_unknown_zone_does_not_gain_authorization_on_reconne
     group = native_zones.groups[0]
     group._attr_available = False
     group.async_write_ha_state()
+    for member in group.members:
+        member._attr_is_on = False
+        member.async_write_ha_state()
     assert await hass.config_entries.async_setup(multi_entry.entry_id)
     await hass.async_block_till_done()
     c = multi_entry.runtime_data
     await settle(hass, c)
     assert c.engine.snapshot() == before
-    assert list(c.authorizations.values()) == [False, True, True]
     assert c.status == "degraded"
     group._attr_available = True
     group._attr_is_on = True
-    group.async_write_ha_state()  # Retained On is not a new authorization.
-    await settle(hass, c)
-    assert c.status == "awaiting_resume"
-    assert not list(c.authorizations.values())[0]
-    await c.command(list(c.outputs)[1], "on", {"brightness": 60}, None)
-    await settle(hass, c)
-    assert len(native_zones.groups[1].calls) == 1
-    assert not group.calls
-    await c.sync()
-    await settle(hass, c)
-    assert not group.calls
-    await c.command(next(iter(c.outputs)), "on", {"brightness": 70}, None)
+    group.async_write_ha_state()
     await settle(hass, c)
     assert c.status == "in_sync"
     assert len(group.calls) == 1
+    await c.command(list(c.outputs)[1], "on", {"brightness": 60}, None)
+    await settle(hass, c)
+    assert len(native_zones.groups[1].calls) == 1
+    assert len(group.calls) == 1
+    await c.sync()
+    await settle(hass, c)
+    assert len(group.calls) == 1
+    await c.command(next(iter(c.outputs)), "on", {"brightness": 70}, None)
+    await settle(hass, c)
+    assert c.status == "in_sync"
+    assert len(group.calls) == 2
 
 
 async def test_multi_degraded_retry_and_supersession_never_use_alias(
@@ -574,6 +575,58 @@ async def test_multi_alias_recovery_does_not_clear_rejected_zone_delivery(
     assert not alias.calls
 
 
+async def test_multi_recovery_retries_only_the_recovered_failed_zone(
+    hass, native_zones, multi_entry
+):
+    c = multi_entry.runtime_data
+    alias = native_zones.aggregate
+    alias._attr_available = False
+    alias.async_write_ha_state()
+    first, second, healthy = native_zones.groups
+    first.fail = second.fail = True
+    await c.command("normal", "on", {}, None)
+    await c.set_apply(True)
+    await settle(hass, c)
+    assert [len(group.calls) for group in native_zones.groups] == [3, 3, 1]
+    assert list(c.zone_status.values()) == ["failed", "failed", "in_sync"]
+    first._attr_available = False
+    first.async_write_ha_state()
+    await settle(hass, c)
+    first.fail = False
+    first._attr_available = True
+    first.async_write_ha_state()
+    await settle(hass, c)
+    assert [len(group.calls) for group in native_zones.groups] == [4, 3, 1]
+    assert list(c.zone_status.values()) == ["in_sync", "failed", "in_sync"]
+    assert first.is_on and healthy.is_on and not second.is_on
+    assert not alias.calls
+
+
+async def test_multi_reconciliation_limit_preserves_zone_error(
+    hass, native_zones, multi_entry, monkeypatch
+):
+    from custom_components.light_masks import controller
+
+    monkeypatch.setattr(controller, "MAX_RECONCILIATIONS", 1)
+    c = multi_entry.runtime_data
+    await c.set_apply(True)
+    await settle(hass, c)
+    group = native_zones.groups[0]
+    for _ in range(2):
+        await call(hass, group.entity_id)
+        await asyncio.sleep(0.04)
+        await settle(hass, c)
+    assert c.status == "failed"
+    assert list(c.zone_status.values()) == ["failed", "in_sync", "in_sync"]
+    assert "competing" in c.diagnostics()["error"]
+    assert "competing" in c.diagnostics()["zones"][next(iter(c.outputs))]["error"]
+    native_zones.members[-1].async_write_ha_state()
+    await asyncio.sleep(0.04)
+    await settle(hass, c)
+    assert c.status == "failed"
+    assert "competing" in c.diagnostics()["error"]
+
+
 async def test_multi_unknown_without_snapshot_fails_instead_of_reseeding(
     hass, native_zones, multi_entry
 ):
@@ -628,7 +681,7 @@ async def test_multi_options_display_fixed_targets_even_when_registry_entry_miss
     hass.config_entries.options.async_abort(result["flow_id"])
 
 
-async def test_multi_external_change_suspends_and_never_adopts(hass, native_zones, multi_entry):
+async def test_multi_external_change_reconciles_and_never_adopts(hass, native_zones, multi_entry):
     c = multi_entry.runtime_data
     await c.command("normal", "on", {"brightness": 90}, None)
     await c.set_apply(True)
@@ -638,10 +691,9 @@ async def test_multi_external_change_suspends_and_never_adopts(hass, native_zone
     native_zones.members[0].async_write_ha_state()
     await asyncio.sleep(0.04)
     await hass.async_block_till_done()
-    assert c.status == "suspended_external_change"
     assert c.engine.normals == normals
-    await c.resume()
     await settle(hass, c)
+    assert c.status == "in_sync"
     assert len(native_zones.groups[0].calls) == 1
     assert len(native_zones.aggregate.calls) == 1
 
@@ -730,7 +782,6 @@ async def test_multi_rename_keeps_facades_and_config_edit_activation(
     ids = entities(hass, multi_entry)
     await call(hass, ids[alarm], brightness=200)
     expiry = c.engine.intents[alarm].expires_at
-    authorizations = dict(c.authorizations)
     zone = next(iter(c.outputs))
     result = await options_step(hass, multi_entry, "rename_zone")
     result = await hass.config_entries.options.async_configure(result["flow_id"], {"zone": zone})
@@ -742,7 +793,6 @@ async def test_multi_rename_keeps_facades_and_config_edit_activation(
     c = multi_entry.runtime_data
     assert c.engine.intents[alarm].on
     assert c.engine.intents[alarm].expires_at == expiry
-    assert c.authorizations == authorizations
     assert entities(hass, multi_entry) == ids
     registered = er.async_get(hass).async_get(ids[zone])
     assert dr.async_get(hass).async_get(registered.device_id).name == "Room Worktop"
@@ -891,7 +941,6 @@ async def test_multi_late_ack_during_other_zone_retry(
     assert c.status == expected
     assert list(c.zone_status.values()) == ["in_sync", "in_sync", expected]
     assert c.diagnostics()["zones"][zones[-1]]["status"] == expected
-    assert not c.engine.suspended
     assert not native_zones.aggregate.calls
     assert all(not member.calls for member in native_zones.members)
 
@@ -924,7 +973,7 @@ async def test_multi_zone_calls_do_not_wait_for_previous_ack(
     assert list(c.zone_status.values()) == ["unverified", "in_sync", "in_sync"]
 
 
-async def test_multi_divergence_during_other_zone_retry_suspends_after_busy(
+async def test_multi_divergence_during_other_zone_retry_reconciles_after_busy(
     hass, native_zones, multi_entry
 ):
     c = multi_entry.runtime_data
@@ -943,9 +992,10 @@ async def test_multi_divergence_during_other_zone_retry_suspends_after_busy(
     await settle(hass, c)
     await asyncio.sleep(0.05)
     await hass.async_block_till_done()
-    assert c.status == "suspended_external_change"
+    await settle(hass, c)
+    assert c.status == "in_sync"
     assert c.engine.normals == normals
-    assert not native_zones.groups[0].calls
+    assert len(native_zones.groups[0].calls) == 1
     assert all(not m.calls for m in native_zones.members)
 
 
@@ -1169,7 +1219,31 @@ async def test_multi_final_review_revalidates_topology_and_confirmation(hass, na
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {"confirm": True})
     assert result["errors"] == {"base": "group_changed"}
     assert not hass.config_entries.async_entries("light_masks")
-    hass.config_entries.flow.async_abort(result["flow_id"])
+    group._attr_extra_state_attributes = {"group_entities": [m.entity_id for m in group.members]}
+    group.async_write_ha_state()
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"confirm": True})
+    assert result["type"] == "create_entry"
+    assert result["result"].unique_id == "multi_zone:" + ",".join(
+        sorted(er.async_get(hass).async_get(group.entity_id).id for group in native_zones.groups)
+    )
+    await hass.async_block_till_done()
+    await hass.config_entries.async_unload(result["result"].entry_id)
+
+
+async def test_multi_duplicate_pending_flow_aborts_with_stable_identity(hass, native_zones):
+    first = await begin_zones(hass, native_zones)
+    second = await begin_zones(hass, native_zones)
+    first = await hass.config_entries.flow.async_configure(first["flow_id"], {"confirm": True})
+    assert first["type"] == "create_entry"
+    assert first["result"].unique_id == "multi_zone:" + ",".join(
+        sorted(er.async_get(hass).async_get(group.entity_id).id for group in native_zones.groups)
+    )
+    await hass.async_block_till_done()
+    second = await hass.config_entries.flow.async_configure(second["flow_id"], {"confirm": True})
+    assert second["type"] == "abort"
+    assert second["reason"] == "already_configured"
+    assert len(hass.config_entries.async_entries("light_masks")) == 1
+    await hass.config_entries.async_unload(first["result"].entry_id)
 
 
 async def test_multi_rejects_owned_zone_during_final_review(hass, native_zones):
@@ -1182,8 +1256,14 @@ async def test_multi_rejects_owned_zone_during_final_review(hass, native_zones):
     await hass.async_block_till_done()
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {"confirm": True})
     assert result["errors"] == {"base": "already_configured"}
-    hass.config_entries.flow.async_abort(result["flow_id"])
-    await hass.config_entries.async_unload(single["result"].entry_id)
+    assert await hass.config_entries.async_remove(single["result"].entry_id)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"confirm": True})
+    assert result["type"] == "create_entry"
+    assert result["result"].unique_id == "multi_zone:" + ",".join(
+        sorted(er.async_get(hass).async_get(group.entity_id).id for group in native_zones.groups)
+    )
+    await hass.async_block_till_done()
+    await hass.config_entries.async_unload(result["result"].entry_id)
 
 
 async def test_multi_flow_one_zone_and_duplicate_can_be_corrected(hass, native_zones):
@@ -1202,7 +1282,15 @@ async def test_multi_flow_one_zone_and_duplicate_can_be_corrected(hass, native_z
         {**one, "name": "Two", "output": native_zones.groups[1].entity_id},
     )
     assert result["step_id"] == "aggregate"
-    hass.config_entries.flow.async_abort(result["flow_id"])
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"confirm": True})
+    assert result["type"] == "create_entry"
+    assert result["result"].unique_id == "multi_zone:" + ",".join(
+        sorted(
+            er.async_get(hass).async_get(group.entity_id).id for group in native_zones.groups[:2]
+        )
+    )
+    await hass.async_block_till_done()
+    await hass.config_entries.async_unload(result["result"].entry_id)
 
 
 async def test_multi_registry_rename_reloads_by_identity(hass, native_zones, multi_entry):

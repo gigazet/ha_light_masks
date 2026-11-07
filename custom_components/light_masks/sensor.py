@@ -64,14 +64,12 @@ class DeliverySensor(MaskEntity, SensorEntity):
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = [
         "shadow",
-        "awaiting_resume",
         "in_sync",
         "pending",
         "unverified",
         "unavailable",
         "degraded",
         "failed",
-        "suspended_external_change",
     ]
 
     @property

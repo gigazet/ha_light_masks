@@ -19,7 +19,8 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen --group ha --python 3.14
-      - run: uv run --no-sync python -m pytest -q --timeout=20
+      - run: uv run --no-sync python -m pytest -q --timeout=20 --cov=custom_components.light_masks --cov-branch
+      - run: uv run --no-sync python -m coverage report --include="custom_components/light_masks/config_flow.py" --fail-under=100
       - run: uv run --no-sync ruff check custom_components tests scripts
       - run: uv run --no-sync ruff format --check custom_components tests scripts
       - run: uv run --no-sync mypy

@@ -120,7 +120,6 @@ class LightMasksConfigFlow(ConfigFlow, domain=DOMAIN):
             try:
                 if not user_input.get("output"):
                     raise ValueError("unavailable_output")
-                state = validate_endpoint(self.hass, user_input["output"])
                 registered = er.async_get(self.hass).async_get(user_input["output"])
                 await self.async_set_unique_id(
                     registered.id if registered else user_input["output"]
@@ -202,6 +201,11 @@ class LightMasksConfigFlow(ConfigFlow, domain=DOMAIN):
                     if user_input.get("aggregate")
                     else None
                 )
+                await self.async_set_unique_id(
+                    "multi_zone:"
+                    + ",".join(sorted(zone["output_registry_id"] for zone in self._zones))
+                )
+                self._abort_if_unique_id_configured()
                 validate_zones(self.hass, self._zones, aggregate, enrolling=True)
                 if not user_input["confirm"]:
                     raise ValueError("confirm_routing")
@@ -325,23 +329,11 @@ class LightMasksOptionsFlow(OptionsFlow):
     async def async_step_base(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         entry = self.config_entry
         old_output = output_entity(self.hass, entry)
-        errors = {}
         if user_input is not None:
-            try:
-                if user_input.get("output", old_output) != old_output:
-                    raise ValueError("base_fixed")
-            except ValueError as err:
-                errors["base"] = str(err)
-            else:
-                self.hass.config_entries.async_update_entry(
-                    entry,
-                    title=user_input["name"],
-                )
-                return self.async_create_entry(title="", data=dict(entry.options))
-        values = {"name": entry.title, "output": old_output, **(user_input or {})}
+            self.hass.config_entries.async_update_entry(entry, title=user_input["name"])
+            return self.async_create_entry(title="", data=dict(entry.options))
         return self.async_show_form(
             step_id="base",
-            errors=errors,
             description_placeholders={
                 "output": ", ".join(
                     registered.entity_id
@@ -354,7 +346,7 @@ class LightMasksOptionsFlow(OptionsFlow):
             },
             data_schema=vol.Schema(
                 {
-                    vol.Required("name", default=values["name"]): vol.All(
+                    vol.Required("name", default=entry.title): vol.All(
                         str, vol.Strip, vol.Length(min=1)
                     ),
                 }

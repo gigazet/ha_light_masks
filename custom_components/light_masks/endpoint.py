@@ -32,7 +32,7 @@ def _zigbee2mqtt_group(
         not isinstance(bridge, dr.DeviceEntry)
         or bridge.manufacturer != "Zigbee2MQTT"
         or bridge.model != "Bridge"
-        or registered.config_entry_id not in bridge.config_entries
+        or registered.config_entry_id != bridge.config_entry_id
         or not any(
             domain == "mqtt" and re.fullmatch(r"zigbee2mqtt_.+_[0-9]+", identifier)
             for domain, identifier in device.identifiers

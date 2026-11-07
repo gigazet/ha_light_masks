@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, replace
-from typing import Literal, cast
+from typing import Literal
 
 from .model import Color, Intent, Mask, Resolution, resolve, validate_masks
 
@@ -85,7 +85,6 @@ class Engine:
         self.masks = masks
         self.intents = {mask.id: Intent() for mask in masks}
         self.apply = False
-        self.suspended = False
         self.revision = 0
         self.lock = asyncio.Lock()
         self._save = save
@@ -104,7 +103,7 @@ class Engine:
         return producer == "normal" or producer in self.normals
 
     def _snapshot(
-        self, normals: dict[str, Intent], intents: dict[str, Intent], apply: bool, suspended: bool
+        self, normals: dict[str, Intent], intents: dict[str, Intent], apply: bool
     ) -> Snapshot:
         return {
             **(
@@ -117,11 +116,10 @@ class Engine:
             ),
             "intents": {key: encode(value) for key, value in intents.items()},
             "apply": apply,
-            "suspended": suspended,
         }
 
     def snapshot(self) -> Snapshot:
-        return self._snapshot(self.normals, self.intents, self.apply, self.suspended)
+        return self._snapshot(self.normals, self.intents, self.apply)
 
     def restore(
         self, raw: Mapping[str, object], now: float, *, preserve_activation: bool = False
@@ -152,7 +150,6 @@ class Engine:
             raise ValueError("Invalid stored operating mode")
         self.normals, self.intents = normals, intents
         self.apply = raw["apply"]
-        self.suspended = cast(bool, raw.get("suspended", False))
 
     def resolution(self, now: float, zone: str | None = None) -> Resolution:
         return resolve(
@@ -163,11 +160,11 @@ class Engine:
         return {zone: self.resolution(now, zone) for zone in self.normals}
 
     async def _commit(
-        self, normals: dict[str, Intent], intents: dict[str, Intent], apply: bool, suspended: bool
+        self, normals: dict[str, Intent], intents: dict[str, Intent], apply: bool
     ) -> None:
-        await self._save(self._snapshot(normals, intents, apply, suspended))
+        await self._save(self._snapshot(normals, intents, apply))
         self.normals, self.intents = normals, intents
-        self.apply, self.suspended = apply, suspended
+        self.apply = apply
         self.revision += 1
 
     async def update(
@@ -261,39 +258,16 @@ class Engine:
                     )
             else:
                 intents[producer] = intent
-            await self._commit(normals, intents, self.apply, self.suspended)
+            await self._commit(normals, intents, self.apply)
             return previous, self.resolution(now).intent
 
-    async def set_mode(self, *, apply: bool | None = None, suspended: bool | None = None) -> None:
+    async def set_mode(self, *, apply: bool | None = None) -> None:
         async with self.lock:
             await self._commit(
                 self.normals,
                 self.intents,
                 self.apply if apply is None else apply,
-                self.suspended if suspended is None else suspended,
             )
-
-    async def reconcile(
-        self, observed: Intent, now: float, revision: int
-    ) -> Literal["superseded", "suspended", "adopted"]:
-        async with self.lock:
-            if revision != self.revision:
-                return "superseded"
-            if any(
-                i.on and (i.expires_at is None or i.expires_at > now) for i in self.intents.values()
-            ):
-                await self._commit(self.normals, self.intents, self.apply, True)
-                return "suspended"
-            normal = replace(
-                self.normal,
-                on=observed.on,
-                brightness=observed.brightness or self.normal.brightness,
-                color=observed.color or self.normal.color,
-            )
-            if self.multi_zone:
-                raise ValueError("Multi-zone telemetry cannot change ordinary intent")
-            await self._commit({"normal": normal}, self.intents, self.apply, self.suspended)
-            return "adopted"
 
     async def expire(self, now: float) -> bool:
         async with self.lock:
@@ -305,5 +279,5 @@ class Engine:
             }
             if intents == self.intents:
                 return False
-            await self._commit(self.normals, intents, self.apply, self.suspended)
+            await self._commit(self.normals, intents, self.apply)
             return True

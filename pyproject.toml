@@ -5,7 +5,7 @@ description = "Independent light intents composed through Home Assistant virtual
 requires-python = ">=3.14.2"
 
 [dependency-groups]
-dev = ["pytest>=8.3", "pytest-asyncio>=1.0", "ruff>=0.12", "mypy>=1.16", "voluptuous>=0.15", "pillow>=11"]
+dev = ["pytest>=8.3", "pytest-asyncio>=1.0", "pytest-cov>=6", "ruff>=0.12", "mypy>=1.16", "voluptuous>=0.15", "pillow>=11"]
 ha = ["homeassistant==2026.9.3", "pytest-homeassistant-custom-component"]
 
 [tool.pytest.ini_options]
