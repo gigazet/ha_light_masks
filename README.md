@@ -9,7 +9,7 @@ and a finished appliance show a notification on the **same light**.
 Each automation talks to its own normal-looking virtual light. Light Masks combines
 their requests and sends one resolved result to the real bulb or compatible light group.
 
-**Beta: 0.4.0b3** · **Home Assistant: 2026.9.3 development baseline** ·
+**Stable: 0.4.0** · **Home Assistant: 2026.9.3 development baseline** ·
 **UI: English / Ukrainian** · **License: [MIT](LICENSE)**
 
 [Get started](#get-started) · [Terminology](#terminology) ·
@@ -111,9 +111,9 @@ not a snapshot captured before the notification.
 | **Shadow mode** | Apply is Off. Requests are stored and combined, but not sent to the base. |
 | **Delivery status** | Whether physical feedback agrees with the desired result. Different from a mask's activation or permissions. |
 
-## Multi-zone native groups (0.4.0b3 beta)
+## Multi-zone native groups (0.4.0)
 
-**Opt-in beta feature; not included in stable 0.3.4.** Existing
+**Opt-in feature, stable from 0.4.0; not included in 0.3.4.** Existing
 single-output entries keep their configuration, entity IDs and saved intent.
 There is no automatic conversion or live migration to multi-zone mode.
 
@@ -429,7 +429,7 @@ Not supported:
   and flash actions.
 - Automatic automation migration, base-light replacement, arbitrary cross-entry
   synchronization, or a visual composition preview. Native multi-zone broadcast
-  planning is opt-in in the 0.4.0b3 beta; it is not in stable 0.3.4.
+  planning is opt-in from 0.4.0; it is not in 0.3.4.
 - Attributing every hardware report to a human or a specific external automation.
 
 Unsafe aggregates and duplicate owners are rejected. The independence-confirmation
@@ -456,7 +456,7 @@ Use explicit virtual entity IDs; manage areas, labels and exposure yourself.
 
 ## Manual installation
 
-1. Back up Home Assistant configuration. Build or obtain `light-masks-0.4.0b3.zip`
+1. Back up Home Assistant configuration. Build or obtain `light-masks-0.4.0.zip`
    (local builds are in `dist`) and extract it.
    Copy its `custom_components\light_masks` directory into the Home Assistant
    configuration directory's `custom_components` directory. Do not copy `.venv`,
@@ -494,14 +494,14 @@ category **Integration**, and download Light Masks. Restart HA, then follow setu
 above. HACS installs the integration directory; the manual-install ZIP is not a
 HACS `zip_release` asset. The minimum declared HA version is 2026.9.3.
 
-**Beta opt-in:** update repository information in HACS, choose **Redownload**,
-expand **Need a different version?**, and select the `v0.4.0b3` prerelease.
-Older HACS versions may require enabling beta versions first. Restart HA and
-verify that the installed integration version is `0.4.0b3` before configuring
-zones. Stable users can remain on `v0.3.4`; this beta is a GitHub prerelease, not
-the latest stable release. This is a custom-repository installation, not a new
-default HACS catalog listing. Follow the multi-zone commissioning and downgrade
-precautions above; do not downgrade with a multi-zone entry still enabled.
+**Upgrading to 0.4.0:** update repository information in HACS and install
+`v0.4.0`, then restart HA and verify the installed version is `0.4.0`. Users on
+`0.4.0b3` or `0.3.4` need no configuration migration: a stored legacy suspension
+is cleared on load and the obsolete Resume button entity is removed automatically.
+This is a custom-repository
+installation, not a new default HACS catalog listing. Follow the multi-zone
+commissioning and downgrade precautions above; do not downgrade below 0.4.0 with
+a multi-zone entry still enabled.
 
 The repository includes `hacs.json`, integration-local branding, an MIT license,
 and GitHub Actions for tests, Ruff, mypy, hassfest and HACS validation. This does
@@ -637,7 +637,7 @@ during outages. Recovery uses the latest intent, not the pre-outage command.
 | Sync | Retry current result; does not clear storage or unsafe-topology faults. |
 | Pending | Physical delivery or confirmation is underway. |
 | In sync | Every output member reports the normalized desired state within tolerance. Not independent proof of emitted light. |
-| Unverified | A call returned but no confirming state report arrived; automatic retries stop. |
+| Unverified | A call returned but no confirming state report arrived; automatic retries stop. For 10 seconds afterwards, late or partial reports are treated as feedback. Matching late reports confirm `in_sync` and re-enable automatic reconciliation. |
 | Failed | Bounded delivery failed, storage failed, or the endpoint became unsafe. Inspect diagnostics/Repairs. |
 | Unavailable / Degraded | Defer unavailable hardware; healthy multi-zone outputs continue through native groups. |
 

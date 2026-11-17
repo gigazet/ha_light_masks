@@ -4,6 +4,24 @@ This public record omits household names, entity/device identifiers, room
 locations and test dates. Pilot mask names below are generic aliases; reported
 test measurements and coverage limits are preserved.
 
+## 0.4.0 stable late single-output acknowledgment
+
+Stable 0.4.0 promotes the 0.4.0b3 multi-zone feature set and the automatic
+reconciliation and outage recovery from issue #3. It also fixes late feedback
+seen in the pilot. A single-member native group output reported power about
+5.5 seconds after the command, after the 3-second window had marked delivery
+unverified, and reported brightness/color 1-2 seconds later.
+
+After a delivery ends unverified, observation waits up to 10 seconds for late
+or partial feedback before judging divergence. Matching late feedback confirms
+`in_sync` and clears the unverified latch, so later external changes are
+reconciled automatically again instead of being ignored until the next command.
+Confirmed deliveries open no window. No commands are resent, and there are no
+configuration or snapshot changes.
+
+A regression case covers late partial-then-complete feedback confirming without
+a resend, followed by automatic reconciliation of a genuine later change.
+
 ## 0.4.0b3 beta multi-zone confirmation timing
 
 The user-confirmed timing policy increases the multi-zone per-attempt

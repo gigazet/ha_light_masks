@@ -38,6 +38,8 @@ _LOGGER = logging.getLogger(__name__)
 ACK_TIMEOUT = 3.0
 MULTI_ZONE_ACK_TIMEOUT = 5.0
 SETTLE_SECONDS = 0.75
+# After an unverified delivery, late/partial reports are feedback, not external changes.
+LATE_ACK_GRACE = 10.0
 MAX_ATTEMPTS = 3
 MAX_RECONCILIATIONS = 3
 RECONCILIATION_WINDOW = 60.0
@@ -106,6 +108,7 @@ class Controller:
         self._desired_zones: dict[str, Intent] = {}
         self._generation = 0
         self._failure_latched = False
+        self._late_ack_until = 0.0
         self._safety_block = False
         self._availability: tuple[frozenset[str], bool] | None = None
         self._delivery_failures: dict[str, str] = {}
@@ -165,6 +168,10 @@ class Controller:
     def _confirm(self) -> None:
         if self._safety_block:
             return
+        self._late_ack_until = 0.0
+        if not self._delivery_failures:
+            # Late convergence re-enables automatic reconciliation of later changes.
+            self._failure_latched = False
         self.status, self.error = "in_sync", None
         self.zone_status = dict.fromkeys(self.outputs, "in_sync")
         self._update_health()
@@ -454,11 +461,15 @@ class Controller:
             if self.engine.apply and not self._safety_block:
                 self._confirm()
             return
-        if (
-            not self.engine.apply
-            or self._safety_block
-            or (self._failure_latched and not self.engine.multi_zone)
-        ):
+        if not self.engine.apply or self._safety_block:
+            return
+        if (remaining := self._late_ack_until - self.hass.loop.time()) > 0:
+            # Judge divergence only once the unacknowledged command can no longer report.
+            if self._settle:
+                self._settle.cancel()
+            self._settle = self.hass.loop.call_later(remaining, self._schedule_settled)
+            return
+        if self._failure_latched and not self.engine.multi_zone:
             return
         now = self.hass.loop.time()
         while self._reconciliations and self._reconciliations[0] <= now - RECONCILIATION_WINDOW:
@@ -569,6 +580,7 @@ class Controller:
 
     async def _deliver(self, desired: Intent, generation: int) -> None:
         ack_timeout = MULTI_ZONE_ACK_TIMEOUT if self.engine.multi_zone else ACK_TIMEOUT
+        self._late_ack_until = 0.0
         desired_zones = self.desired_zones()
         transitions = (
             dict(self.transitions)
@@ -710,6 +722,8 @@ class Controller:
         if unresolved or unverified:
             self.status = "failed" if unresolved else "unverified"
             self._failure_latched = True
+            if unverified:
+                self._late_ack_until = self.hass.loop.time() + LATE_ACK_GRACE
             self._update_health()
             if unresolved:
                 self.fault("delivery", self.error or "Output did not converge after three attempts")

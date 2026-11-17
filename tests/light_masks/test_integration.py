@@ -531,6 +531,45 @@ async def test_no_report_is_unverified_without_retries(hass, integration, output
     assert controller.status == "in_sync"
 
 
+@pytest.mark.parametrize("z2m_output", [1], indirect=True)
+async def test_late_partial_group_ack_confirms_and_rearms_reconciliation(
+    hass, z2m_output, z2m_integration, monkeypatch
+):
+    from custom_components.light_masks import controller as controller_module
+
+    monkeypatch.setattr(controller_module, "LATE_ACK_GRACE", 0.5)
+    controller = z2m_integration.runtime_data
+    group, (member,) = z2m_output.group, z2m_output.members
+    group.report = False
+    await controller.set_apply(True)
+    await call(hass, entities(hass, z2m_integration)["normal"], brightness=200)
+    await settle(hass, controller)
+    assert controller.status == "unverified"
+    # Late device feedback: power first, attributes in a later report.
+    for light in (group, member):
+        light._attr_is_on = True
+        light.async_write_ha_state()
+    await asyncio.sleep(0.05)
+    await hass.async_block_till_done()
+    assert controller.status == "unverified"
+    for light in (group, member):
+        light._attr_brightness = 200
+        light.async_write_ha_state()
+    await asyncio.sleep(0.05)
+    await hass.async_block_till_done()
+    assert controller.status == "in_sync"
+    assert len(group.calls) == 1
+    # A genuine later change is reconciled again instead of staying latched.
+    group.report = True
+    member._attr_is_on = False
+    member.async_write_ha_state()
+    await asyncio.sleep(0.05)
+    await settle(hass, controller)
+    assert len(group.calls) == 2
+    assert member.is_on
+    assert controller.status == "in_sync"
+
+
 async def test_delivery_failure_bounded_and_explicit_retry(hass, integration, output):
     controller = integration.runtime_data
     output.fail = True
